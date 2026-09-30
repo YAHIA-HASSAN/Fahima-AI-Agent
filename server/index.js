@@ -8,6 +8,8 @@ const { amountFromText } = require('./finance');
 const B = require('./business');
 const { createBusinessTools, executeBusinessTool } = require('./business-tools');
 const { randomUUID } = require('node:crypto');
+const { createGeminiClient } = require('./gemini-client');
+const quota = require('./gemini-quota');
 const config = loadConfig();
 if (config.issues.length) console.warn('Configuration values need attention:', config.issues.join(' '));
 // Ensure the first visit has a selectable local project, including on a fresh database.
@@ -178,6 +180,32 @@ app.get('/api/init',(req,res)=>{
   res.json({project,conversationId:conversation.id,transactions:B.getTransactions(project.id,bounds.from,bounds.to),summary:B.getSummary(project.id,bounds.from,bounds.to),period:bounds,products:B.getProducts(project.id),facts,reminders:B.getReminders(project.id)});
 });
 
+app.post('/api/tts',async(req,res)=>{
+  const text=String(req.body.text||'').trim();
+  if(!text||text.length>3000)return res.status(400).json({error:'مفيش نص صالح لتحويله لصوت.'});
+  if(!config.geminiApiKey)return res.status(503).json({error:'تحويل الرد لصوت محتاج GEMINI_API_KEY.'});
+  let usageId=null;
+  try{
+    usageId=quota.reserve(Math.ceil(text.length/4)+800);
+    const client=createGeminiClient(config);
+    const interaction=await client.interactions.create({
+      model:'gemini-3.8-flash-lite-tts',
+      input:[{type:'user_input',content:[{type:'text',text,annotations:[{type:'speech_metadata',style:'Speak in a warm, natural Egyptian Arabic feminine voice. Read the text verbatim.'}]}]}],
+      response_format:{type:'audio',mime_type:'audio/wav'},
+      generation_config:{speech_config:[{voice:'Aoede'}]},
+    });
+    const audio=interaction?.output_audio?.data;
+    if(!audio)throw new Error('Gemini returned no audio.');
+    quota.finish(usageId,{status:'success'});
+    return res.type('audio/wav').send(Buffer.from(audio,'base64'));
+  }catch(error){
+    if(usageId)quota.finish(usageId,{status:Number(error?.status)===429?'provider_429':'error'});
+    const providerStatus=Number(error?.status||error?.statusCode||error?.response?.status||error?.cause?.status||0);
+    const status=error?.code==='LOCAL_GEMINI_RATE_LIMIT'||error?.code==='LOCAL_GEMINI_DAILY_LIMIT'?429:providerStatus===429?429:503;
+    console.error('Speech generation failed:',[error?.name||'Error',error?.code||null,providerStatus?`HTTP ${providerStatus}`:null].filter(Boolean).join(' / '));
+    return res.status(status).json({error:status===429?'تعذر تجهيز الصوت الآن بسبب حد الاستخدام. جربي بعد شوية.':'تعذر تجهيز الصوت من Gemini. جربي مرة تانية أو استخدمي صوت المتصفح.'});
+  }
+});
 app.post('/api/chat',async(req,res)=>{
   const text=String(req.body.message||'').trim();if(!text||text.length>1500)return res.status(400).json({error:'اكتبي رسالة قصيرة للمساعد.'});
   const project=projectOr404(req.body.projectId||1,res);if(!project)return;
@@ -214,13 +242,8 @@ app.post('/api/chat',async(req,res)=>{
   const context=currentContext(conversation,project,text);let parsed;
   const tools=createBusinessTools(project.id);
   try{
-    const deterministic=deterministicFallback(text);
     const domainCheck=isOutOfDomain(text);
     if(domainCheck) parsed={intent:'question',answer:'أنا فهيمه، شغلي أساعدك في مشروعك والبيع والمصاريف والمشتريات والمخزون وتنظيم الشغل. احكيلي عن حاجة تخص مشروعك وأنا أساعدك.'};
-    else if(deterministic?.intent==='question') parsed=deterministic;
-    else if(/(?:تقرير|pdf)/iu.test(text)&&/(?:اعملي|اعمل|جهزي|جهز|اطلبي|اطلب|نزلي|نزل|عايزة|عايز|ممكن)/u.test(text)) parsed={intent:'create_report',period:/النهارده|اليوم/u.test(text)?'today':/الأسبوع|الاسبوع/u.test(text)?'week':/كل الفترة|من البداية/u.test(text)?'all':'month'};
-    else if(/(?:بعت|مبيعات|المبيعات).{0,40}(?:كام|قد\s*إيه|قد\s*ايه|إجمالي|اجمالي|مجموع)|(?:كام|قد\s*إيه|قد\s*ايه).{0,40}(?:بعت|مبيعات)/u.test(text)) parsed={intent:'daily_sales_summary',period:/النهارده|اليوم/u.test(text)?'today':/الأسبوع|الاسبوع/u.test(text)?'week':/الشهر|شهري/u.test(text)?'month':'today'};
-    else if(/(?:عامل(?:ة)?\s*إيه|وضع المشروع|ملخص|حسابات).*(?:الشهر|شهري)/u.test(text)) parsed={intent:'period_summary',period:'month'};
     else parsed=await extract(text,context);
   }catch(e){
     const status=Number(e?.status||e?.statusCode||e?.response?.status||e?.cause?.status||0);

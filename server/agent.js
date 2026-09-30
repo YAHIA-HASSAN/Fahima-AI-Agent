@@ -71,8 +71,9 @@ async function generateGemini(input, responseSchema = null) {
 
 async function extract(text, context = {}) {
   if (!process.env.GEMINI_API_KEY) {
-    const x = localExtract(text);
-    return { intent: x.type ? 'record_transaction' : 'unknown', transaction_type: x.type, amount: x.amount, amount_kind: x.amount === null ? null : 'total', date: x.date, period: 'today', description: x.description, estimated: x.estimated, product_name: null, quantity: null, unit: null, unit_price: null, markup_percent: null, reminder_title: null, due_date: null, fact_key: null, fact_value: null, answer: x.amount === null ? 'قوليلي نوع العملية والمبلغ عشان أسجّلها.' : '' };
+    const error = new Error('Gemini API key is not configured.');
+    error.code = 'GEMINI_NOT_CONFIGURED';
+    throw error;
   }
   const limits = loadConfig().agent;
   const historyRows = (context.history || []).slice(-limits.recentMessageLimit).map(m => `${m.role === 'assistant' ? 'فهيمه' : 'المستخدم'}: ${String(m.content).slice(0,400)}`);
@@ -96,13 +97,7 @@ function deterministicFallback(text) {
   if (/^(السلام عليكم|سلام عليكم|أهلا|اهلا|أهلًا|اهلين|صباح الخير|مساء الخير)[!.، ]*$/u.test(value)) {
     return { intent: 'question', answer: 'وعليكم السلام، أهلًا بيكي. قوليلي عايزة تسجلي عملية، تسألي عن حسابات المشروع، ولا أجهزلك تقرير PDF.' };
   }
-  const livestock = /(?:بط|بطة|بطات|فراخ|دواجن|كتاكيت)/u.test(value);
-  if (livestock && /(?:هكسب|هخسر|مكسب|خسارة|ربح|كسب)/u.test(value)) {
-    return { intent: 'question', answer: 'عدد البط ومدة التربية لوحدهم ما يكفوش نعرف كسبتي ولا خسرانة. نبدأ بتكلفة شراء البط كلها كام؟ وبعدها نحسب العلف والأدوية والمصاريف وسعر البيع المتوقع كتقدير، من غير ما نسميه صافي ربح.' };
-  }
-  if (livestock && /(?:عندي|معايا|بربي|بربيهم)/u.test(value) && !/(?:جنيه|جنيهات|جنية|تكلفة|تكلفتها|ثمن|سعر|دفعت|صرفت|بمبلغ)/u.test(value)) {
-    return { intent: 'question', answer: 'فهمت إن عندك كمية من البط. العدد مش مبلغ شراء، فمش هسجله كفلوس. لو عايزة تسجلي تكلفتهم قولي إجمالي اللي دفعتيه بالجنيه.' };
-  }
+
 
   const transaction = localExtract(value);
   if (transaction.type && transaction.amount !== null) {
