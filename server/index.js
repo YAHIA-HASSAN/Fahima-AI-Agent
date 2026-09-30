@@ -47,13 +47,13 @@ function upsertFact(projectId,key,value,source='conversation') {
   return db.prepare('SELECT * FROM project_facts WHERE id=?').get(result.lastInsertRowid);
 }
 function addAssistant(conversationId,text) { saveMessage(conversationId,'assistant',text,'text'); }
-function maybeSummarize(conversation) {
+async function maybeSummarize(conversation) {
   const messages=db.prepare('SELECT id,role,content FROM messages WHERE conversation_id=? ORDER BY id').all(conversation.id);
   const count=Number(conversation.summary_message_count||0);
   if(messages.length-count<24 || messages.length<=12)return;
   const toSummarize=messages.slice(count,messages.length-12);
   if(!toSummarize.length)return;
-  const value = summarizeConversation(conversation.summary,toSummarize);
+  const value = await summarizeConversation(conversation.summary,toSummarize);
   db.prepare("UPDATE conversations SET summary=?,summary_message_count=?,updated_at=datetime('now') WHERE id=?").run(value,messages.length-12,conversation.id);
 }
 function currentContext(conversation,project,currentMessage='') {
@@ -184,26 +184,39 @@ app.post('/api/tts',async(req,res)=>{
   const text=String(req.body.text||'').trim();
   if(!text||text.length>3000)return res.status(400).json({error:'مفيش نص صالح لتحويله لصوت.'});
   if(!config.geminiApiKey)return res.status(503).json({error:'تحويل الرد لصوت محتاج GEMINI_API_KEY.'});
-  let usageId=null;
+  let lastError=null;
   try{
-    usageId=quota.reserve(Math.ceil(text.length/4)+800);
     const client=createGeminiClient(config);
-    const interaction=await client.interactions.create({
-      model:'gemini-3.8-flash-lite-tts',
-      input:[{type:'user_input',content:[{type:'text',text,annotations:[{type:'speech_metadata',style:'Speak in a warm, natural Egyptian Arabic feminine voice. Read the text verbatim.'}]}]}],
-      response_format:{type:'audio',mime_type:'audio/wav'},
-      generation_config:{speech_config:[{voice:'Aoede'}]},
-    });
-    const audio=interaction?.output_audio?.data;
-    if(!audio)throw new Error('Gemini returned no audio.');
-    quota.finish(usageId,{status:'success'});
-    return res.type('audio/wav').send(Buffer.from(audio,'base64'));
+    for(let attempt=0;attempt<2;attempt++){
+      let usageId=null;
+      try{
+        usageId=quota.reserve(Math.ceil(text.length/4)+800);
+        const interaction=await client.interactions.create({
+          model:'gemini-3.8-flash-lite-tts',
+          input:[{type:'user_input',content:[{type:'text',text,annotations:[{type:'speech_metadata',style:'Speak in a warm, natural Egyptian Arabic feminine voice. Read the text verbatim.'}]}]}],
+          response_format:{type:'audio',mime_type:'audio/wav'},
+          generation_config:{speech_config:[{voice:'Aoede'}]},
+        });
+        const audio=interaction?.output_audio?.data;
+        if(!audio)throw new Error('Gemini returned no audio.');
+        quota.finish(usageId,{status:'success'});
+        return res.type('audio/wav').send(Buffer.from(audio,'base64'));
+      }catch(error){
+        if(usageId)quota.finish(usageId,{status:Number(error?.status)===429?'provider_429':'error'});
+        lastError=error;
+        const status=Number(error?.status||error?.statusCode||error?.response?.status||error?.cause?.status||0);
+        const detail=`${error?.message||''} ${error?.error?.message||''} ${JSON.stringify(error?.error?.details||error?.details||'')}`;
+        const dailyLimit=/(?:per\s*day|requests?\s*(?:\/|per)\s*day|\bRPD\b|daily quota|day limit|PerDayPerProject)/i.test(detail);
+        if(attempt===0&&status===429&&!dailyLimit){await new Promise(resolve=>setTimeout(resolve,300+Math.floor(Math.random()*500)));continue;}
+        break;
+      }
+    }
+    throw lastError||new Error('Gemini speech generation did not complete.');
   }catch(error){
-    if(usageId)quota.finish(usageId,{status:Number(error?.status)===429?'provider_429':'error'});
     const providerStatus=Number(error?.status||error?.statusCode||error?.response?.status||error?.cause?.status||0);
     const status=error?.code==='LOCAL_GEMINI_RATE_LIMIT'||error?.code==='LOCAL_GEMINI_DAILY_LIMIT'?429:providerStatus===429?429:503;
     console.error('Speech generation failed:',[error?.name||'Error',error?.code||null,providerStatus?`HTTP ${providerStatus}`:null].filter(Boolean).join(' / '));
-    return res.status(status).json({error:status===429?'تعذر تجهيز الصوت الآن بسبب حد الاستخدام. جربي بعد شوية.':'تعذر تجهيز الصوت من Gemini. جربي مرة تانية أو استخدمي صوت المتصفح.'});
+    return res.status(status).json({error:status===429?'Gemini وصل لحد الاستخدام الصوتي مؤقتًا. الرد مكتوب؛ جربي زر الصوت بعد شوية.':'تعذر تجهيز صوت الرد من Gemini. الرد النصي موجود؛ جربي زر الصوت مرة تانية.'});
   }
 });
 app.post('/api/chat',async(req,res)=>{
@@ -235,7 +248,7 @@ app.post('/api/chat',async(req,res)=>{
   const affirmative=/^(أيوه|ايوه|نعم|تمام|موافق(?:ة)?|سجل(?:ي)?|أكد(?:ي)?|اه)$/u.test(text);
   const negative=/^(لأ|لا|الغ(?:ي|اء)|مش دلوقتي|إلغاء|الغاء)$/u.test(text);
   if(active?.status==='awaiting_confirmation'&&affirmative){
-    try{const result=await commitPending(project,conversation,active,{});const reply=result.reply;addAssistant(conversation.id,reply);maybeSummarize(conversation);return res.json({kind:'saved',reply,transaction:result.transaction,conversationId:conversation.id,inputType});}
+    try{const result=await commitPending(project,conversation,active,{});const reply=result.reply;addAssistant(conversation.id,reply);await maybeSummarize(conversation);return res.json({kind:'saved',reply,transaction:result.transaction,conversationId:conversation.id,inputType});}
     catch(e){const reply=e.message;addAssistant(conversation.id,reply);return res.json({kind:'clarify',reply,conversationId:conversation.id,inputType});}
   }
   if(active&&negative){db.prepare('DELETE FROM pending_actions WHERE conversation_id=?').run(conversation.id);const reply='تمام، لغيت العملية المعلقة وماتسجلتش.';addAssistant(conversation.id,reply);return res.json({kind:'answer',reply,conversationId:conversation.id,inputType});}
@@ -315,7 +328,7 @@ app.post('/api/chat',async(req,res)=>{
       default: result={kind:'answer',reply:parsed.answer||'قوليلي عايزة تسجلي بيع أو شراء أو مصروف، تسألي عن حساباتك، أو أجهزلك تقرير PDF.'};
     }
   }catch(e){result={kind:'clarify',reply:e.message||'مش قادر أتعامل مع الطلب دلوقتي.'};}
-  addAssistant(conversation.id,result.reply);if(result.pending){const saved=pendingFor(conversation.id);if(saved)result.pending.id=saved.id;}maybeSummarize(conversation);
+  addAssistant(conversation.id,result.reply);if(result.pending){const saved=pendingFor(conversation.id);if(saved)result.pending.id=saved.id;}await maybeSummarize(conversation);
   res.json({...result,conversationId:conversation.id,inputType});
 });
 

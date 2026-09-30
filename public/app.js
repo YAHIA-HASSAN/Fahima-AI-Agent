@@ -12,6 +12,7 @@ let state = null,
   lastReplyText = "",
   voiceAvailable = false,
   voiceMode = "ready";
+let replyBusy = false;
 const escapeHtml = (s) =>
   String(s ?? "").replace(
     /[&<>"']/g,
@@ -22,6 +23,12 @@ const escapeHtml = (s) =>
   );
 const money = (n) =>
   `${new Intl.NumberFormat("ar-EG", { maximumFractionDigits: 2 }).format(Number(n) || 0)} جنيه`;
+function setReplyBusy(busy) {
+  replyBusy = Boolean(busy);
+  $("#message-text").disabled = replyBusy;
+  $("#send-text").disabled = replyBusy;
+  $("#record-voice").disabled = replyBusy || voiceMode === "starting" || voiceMode === "processing" || !voiceAvailable;
+}
 async function appFetch(url, options) {
   try {
     return await fetch(url, options);
@@ -117,7 +124,8 @@ function renderFacts(facts) {
 }
 async function sendMessage(text, inputType = "text") {
   const clean = String(text || "").trim();
-  if (!clean) return false;
+  if (!clean || replyBusy) return false;
+  setReplyBusy(true);
   addMessage(clean, "user", inputType === "voice");
   const loading = addMessage("بفكر في كلامك…");
   try {
@@ -134,15 +142,18 @@ async function sendMessage(text, inputType = "text") {
     loading.remove();
     if (result.error) {
       addMessage(result.error).classList.add("error");
+      setReplyBusy(false);
       return false;
     }
     if (result.reply) addMessage(result.reply);
     if (result.kind === "report") await downloadReport(result.period.from, result.period.to);
     if (result.reply) playReplyWithGemini(result.reply, true);
+    else setReplyBusy(false);
     return Boolean(result.reply);
   } catch (e) {
     loading.remove();
     addMessage(e.message).classList.add("error");
+    setReplyBusy(false);
     return false;
   }
 }
@@ -156,8 +167,8 @@ $("#message-form").addEventListener("submit", async (event) => {
   try {
     if (await sendMessage(text, "text")) input.value = "";
   } finally {
-    button.disabled = false;
-    input.focus();
+    button.disabled = replyBusy;
+    if (!replyBusy) input.focus();
   }
 });
 $("#profile-toggle").onclick = () =>
@@ -314,33 +325,23 @@ $("#delete-project").onclick = async () => {
 const recordButton = $("#record-voice");
 const playReplyButton = $("#play-reply");
 const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
-const browserSpeech = window.speechSynthesis || null;
 let recognition = null;
 let finalTranscript = "";
 let submittedTranscript = "";
 let submittedAt = 0;
-let ttsVoices = [];
 function setVoiceMode(mode, message) {
   voiceMode = mode;
   const labels = { ready: "🎤 اتكلمي", starting: "⏳ بجهز السماع…", recording: "⏹ إيقاف وإرسال", processing: "⏳ ثانية واحدة…" };
   recordButton.hidden = false;
   recordButton.textContent = labels[mode] || labels.ready;
-  recordButton.disabled = mode === "starting" || mode === "processing" || !voiceAvailable;
+  recordButton.disabled = replyBusy || mode === "starting" || mode === "processing" || !voiceAvailable;
   recordButton.classList.toggle("recording", mode === "recording");
   recordButton.setAttribute("aria-pressed", String(mode === "recording"));
   $("#recording-status").textContent = message || ({ ready: voiceAvailable ? "اضغطي واتكلمي، واضغطي تاني لما تخلصي." : "الصوت مش متاح هنا، اكتبي رسالتك عادي.", starting: "بجهز الميكروفون…", recording: "سامعاكي… اضغطي لإيقاف الكلام وإرساله.", processing: "بحضّر الرد…" }[mode] || "");
 }
-function refreshBrowserVoices() {
-  ttsVoices = browserSpeech?.getVoices?.() || [];
-}
-if (browserSpeech) {
-  refreshBrowserVoices();
-  browserSpeech.addEventListener?.("voiceschanged", refreshBrowserVoices);
-  browserSpeech.onvoiceschanged = refreshBrowserVoices;
-}
 function voiceStatus() {
   voiceAvailable = Boolean(SpeechRecognitionApi);
-  $("#voice-status").textContent = voiceAvailable ? "الإملاء من المتصفح · قراءة الرد من Gemini أو الجهاز" : "الإملاء غير متاح · قراءة الرد من Gemini أو الجهاز";
+  $("#voice-status").textContent = voiceAvailable ? "الإملاء من المتصفح · صوت الرد من Gemini" : "الإملاء غير متاح · صوت الرد من Gemini";
   $("#voice-status").classList.toggle("voice-offline", !voiceAvailable);
   playReplyButton.hidden = !lastReplyText;
   setVoiceMode("ready");
@@ -387,7 +388,6 @@ recordButton.addEventListener("click", () => {
     recognition?.stop();
     return;
   }
-  browserSpeech?.cancel();
   speechFeedback = "";
   finalTranscript = "";
   recognition = createRecognition();
@@ -397,7 +397,8 @@ recordButton.addEventListener("click", () => {
 });
 playReplyButton.addEventListener("click", () => {
   if (generatedAudio && generatedAudioUrl && generatedAudioText === lastReplyText) {
-    generatedAudio.play().catch(() => { $("#recording-status").textContent = "الصوت جاهز. اضغطي الزر مرة تانية للتشغيل."; });
+    setReplyBusy(true);
+    generatedAudio.play().catch(() => { $("#recording-status").textContent = "الصوت جاهز. اضغطي الزر مرة تانية للتشغيل."; setReplyBusy(false); });
     return;
   }
   playReplyWithGemini(lastReplyText, true);
@@ -407,7 +408,8 @@ let generatedAudioUrl = "";
 let generatedAudioText = "";
 async function playReplyWithGemini(text, autoPlay = false) {
   const clean = String(text || "").trim();
-  if (!clean) return;
+  if (!clean) { setReplyBusy(false); return; }
+  setReplyBusy(true);
   playReplyButton.disabled = true;
   playReplyButton.textContent = "⏳ بجهز الصوت…";
   $("#recording-status").textContent = "بجهز قراءة الرد بصوت عربي…";
@@ -427,56 +429,27 @@ async function playReplyWithGemini(text, autoPlay = false) {
     generatedAudioUrl = URL.createObjectURL(audioBlob);
     generatedAudio = new Audio(generatedAudioUrl);
     generatedAudioText = clean;
-    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي."; };
+    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي."; setReplyBusy(false); };
+    generatedAudio.onerror = () => { $("#recording-status").textContent = "تعذر تشغيل الصوت."; setReplyBusy(false); };
     if (autoPlay) {
       try {
         await generatedAudio.play();
         $("#recording-status").textContent = "فهيمه بتقرأ الرد بصوت عربي.";
       } catch {
         playReplyButton.textContent = "▶️ شغلي الرد";
-        if (browserSpeech && window.SpeechSynthesisUtterance) {
-          $("#recording-status").textContent = "المتصفح منع صوت Gemini التلقائي؛ هجرب صوت الجهاز.";
-          speechAfterReply(clean, true);
-        } else {
-          $("#recording-status").textContent = "الصوت جاهز. اضغطي الزر لتشغيله.";
-        }
+        $("#recording-status").textContent = "المتصفح منع التشغيل التلقائي. الصوت جاهز؛ اضغطي الزر للتشغيل.";
+        setReplyBusy(false);
       }
     } else {
       $("#recording-status").textContent = "الصوت جاهز.";
     }
   } catch (error) {
-    if (browserSpeech && window.SpeechSynthesisUtterance) {
-      $("#recording-status").textContent = "صوت Gemini مش متاح دلوقتي؛ هجرب صوت الجهاز.";
-      speechAfterReply(clean, true);
-    } else {
-      $("#recording-status").textContent = error.message || "تعذر تشغيل الصوت.";
-    }
+    $("#recording-status").textContent = error.message || "تعذر تشغيل صوت Gemini. الرد النصي موجود.";
+    setReplyBusy(false);
   } finally {
     playReplyButton.disabled = false;
     if (!(generatedAudio && generatedAudioUrl && generatedAudioText === lastReplyText && generatedAudio.paused)) playReplyButton.textContent = "🔊 اسمعي الرد";
   }
-}
-function speechAfterReply(text, autoplay = false) {
-  lastReplyText = String(text || "").trim();
-  if (!lastReplyText) return;
-  playReplyButton.hidden = false;
-  playReplyButton.textContent = "🔊 اسمعي الرد";
-  if (!autoplay) return;
-  if (!browserSpeech || !window.SpeechSynthesisUtterance) {
-    $("#recording-status").textContent = "الرد جاهز للصوت. اضغطي «اسمعي الرد» لتشغيله.";
-    return;
-  }
-  try { browserSpeech.cancel(); } catch { /* Speech may be unavailable in a background tab. */ }
-  refreshBrowserVoices();
-  const utterance = new SpeechSynthesisUtterance(lastReplyText);
-  const arabic = ttsVoices.filter((voice) => /^ar(?:-|$)/i.test(voice.lang || ""));
-  utterance.voice = arabic.find((voice) => /^ar-EG$/i.test(voice.lang)) || arabic[0] || ttsVoices[0] || null;
-  utterance.lang = utterance.voice?.lang || "ar-EG";
-  utterance.onstart = () => { voiceMode = "speaking"; $("#recording-status").textContent = "فهيمه بتتكلم دلوقتي."; };
-  utterance.onend = () => { if (voiceMode === "speaking") setVoiceMode("ready", "خلص الرد. تقدري تسجلي رسالة جديدة."); };
-  utterance.onerror = () => { voiceMode = "ready"; $("#recording-status").textContent = "تعذر صوت الجهاز. زر «اسمعي الرد» بيحاول استخدام Gemini."; };
-  try { browserSpeech.resume?.(); browserSpeech.speak(utterance); }
-  catch { $("#recording-status").textContent = "تعذر صوت الجهاز. استخدمي زر «اسمعي الرد» لتجربة Gemini."; }
 }
 voiceStatus();
 function drawRtl(
