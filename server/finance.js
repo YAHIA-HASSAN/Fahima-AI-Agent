@@ -10,17 +10,38 @@ function normalizeDigits(text) {
     return String(ar >= 0 ? ar : '۰۱۲۳۴۵۶۷۸۹'.indexOf(c));
   });
 }
+function parseArabicNumberWords(text) {
+  const normalized = String(text).replace(/[ًٌٍَُِّْـ]/gu, '').replace(/[إأآ]/g, 'ا').replace(/ة/g, 'ه');
+  const values = {صفر:0,واحد:1,واحدة:1,واحده:1,اتنين:2,اثنين:2,اثنان:2,تلاته:3,تلاتة:3,ثلاثه:3,ثلاثة:3,اربعه:4,اربعة:4,اربعه:4,اربعة:4,خمسه:5,خمسة:5,سته:6,ستة:6,سبعه:7,سبعة:7,تمانيه:8,تمانية:8,تمانيه:8,ثمانيه:8,ثمانية:8,تسعه:9,تسعة:9,عشره:10,عشرة:10,حداشر:11,احدعشر:11,اتناشر:12,اثناشر:12,تلتاشر:13,تلاتاشر:13,اربعتاشر:14,خمستاشر:15,ستاشر:16,سبعتاشر:17,تمنتاشر:18,تمانتاشر:18,تسعتاشر:19,عشرين:20,تلاتين:30,ثلاثين:30,اربعين:40,خمسين:50,ستين:60,سبعين:70,تمانين:80,ثمانين:80,تسعين:90,ميه:100,ميه:100,مائه:100,مئه:100,مئتان:200,ميتين:200,تلتميه:300,ثلاثمائه:300,تلاتميه:300,اربعمائه:400,ربعمية:400,خمسمائه:500,خمسمية:500,ستمائه:600,ستمية:600,سبعمائه:700,سبعمية:700,تمنميه:800,ثمانمائه:800,تمنمية:800,تسعمائه:900,تسعمية:900};
+  let total=0, group=0, found=false;
+  for(const original of normalized.split(/\s+/u)){
+    const word=Object.hasOwn(values,original)?original:original.replace(/^[وبفلك]/u,'');
+    if(word==='و'||word==='ب')continue;
+    if(Object.hasOwn(values,word)){group+=values[word];found=true;continue;}
+    if(/^(?:الفين|الفان)$/u.test(word)){total+=2000;group=0;found=true;continue;}
+    if(/^(?:الف|الاف)$/u.test(word)){total+=(group||1)*1000;group=0;found=true;continue;}
+    if(/^(?:مليونين|مليونان)$/u.test(word)){total+=2000000;group=0;found=true;continue;}
+    if(/^مليون$/u.test(word)){total+=(group||1)*1000000;group=0;found=true;continue;}
+    if(/^[0-9٠-٩۰-۹]+(?:[.,٫][0-9٠-٩۰-۹]+)?$/u.test(word)){group+=Number(normalizeDigits(word).replace(',', '.').replace('٫','.'));found=true;continue;}
+    if(found)break;
+  }
+  return found?total+group:null;
+}
 function amountFromText(text) {
-  const s = normalizeDigits(text).replace(/[,٬]/g, '');
-  // Never reduce compound spoken numbers (e.g. "ألف ومتين") to just one component.
-  if (/(?:ألف|الف)\s*و\s*[\p{L}٠-٩0-9]+/u.test(s)) return null;
-  const match = s.match(/(?:حوالي\s*)?(\d+(?:\.\d+)?|ألفين|الفين|ألف|الف|مليون|نص مليون)/i);
-  if (!match) return null;
-  const word = match[1];
-  if (/^ألفين|^الفين/.test(word)) return 2000;
-  if (/^نص/.test(word)) return 500000;
-  if (/^ألف|^الف/.test(word)) return 1000;
-  if (/^مليون/.test(word)) return 1000000;
+  const s=normalizeDigits(text).replace(/[,٬]/g,'');
+  if(/نص\s+(?:ألف|الف|مليون)/u.test(s)) {
+    const match=s.match(/نص\s+(?:ألف|الف|مليون)/u);
+    if(match[0].includes('مليون'))return 500000;
+    return 500;
+  }
+  const spoken=parseArabicNumberWords(s);
+  if(spoken!==null&&Number.isFinite(spoken))return spoken;
+  const match=s.match(/(?:حوالي\s*)?(\d+(?:\.\d+)?|ألفين|الفين|ألف|الف|مليون)/i);
+  if(!match)return null;
+  const word=match[1];
+  if(/^ألفين|^الفين/.test(word))return 2000;
+  if(/^ألف|^الف/.test(word))return 1000;
+  if(/^مليون/.test(word))return 1000000;
   return Number(word);
 }
 function underThousand(value) {
@@ -66,6 +87,11 @@ function speakableArabic(text) {
     return numberToArabicWords(normalized.replace('٫', '.'));
   });
 }
+function cairoDate(date = new Date()) {
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date);
+  const fields=Object.fromEntries(parts.map(part=>[part.type,part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
 function localExtract(text) {
   const s = text.toLowerCase();
   let type = null;
@@ -73,7 +99,7 @@ function localExtract(text) {
   else if (/علف|بضاعة|بضاعه|خامات|اشتريت|شراء|كتاكيت/.test(s)) type = 'stock_cost';
   else if (/للبيت|للمنزل|خدت|سحبت/.test(s)) type = 'withdrawal';
   else if (/كهربا|كهرباء|إيجار|ايجار|مياه|مواصلات|مصروف|دفعت/.test(s)) type = 'operating_expense';
-  return { type, amount: amountFromText(text), date: new Date().toISOString().slice(0,10), description: text.slice(0,180), estimated: /تقريب|تقريبًا|تقريبا|مش فاكر|مش فاكرة|يمكن/.test(s) };
+  return { type, amount: amountFromText(text), date: cairoDate(), description: text.slice(0,180), estimated: /تقريب|تقريبًا|تقريبا|مش فاكر|مش فاكرة|يمكن/.test(s) };
 }
 function validTransaction(x) {
   if (!x || !TYPES[x.type] || !Number.isFinite(Number(x.amount)) || Number(x.amount) <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(x.date) || !String(x.description || '').trim()) return false;

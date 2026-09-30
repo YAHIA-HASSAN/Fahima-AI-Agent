@@ -21,11 +21,6 @@ function readNumber(env, name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGE
 function loadConfig(env = process.env) {
   const issues = [];
   const geminiModel = String(env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim();
-  const geminiMaxRpm = readNumber(env, 'GEMINI_MAX_RPM', 15, { min: 1, max: 10000, integer: true }, issues);
-  const geminiMaxTpm = readNumber(env, 'GEMINI_MAX_TPM', 250000, { min: 1, max: 10000000, integer: true }, issues);
-  const geminiMaxRpd = readNumber(env, 'GEMINI_MAX_RPD', 500, { min: 1, max: 1000000, integer: true }, issues);
-  const geminiDailySoftLimit = readNumber(env, 'GEMINI_DAILY_SOFT_LIMIT', 450, { min: 1, max: geminiMaxRpd, integer: true }, issues);
-  const geminiDailyHardLimit = readNumber(env, 'GEMINI_DAILY_HARD_LIMIT', 490, { min: 1, max: geminiMaxRpd, integer: true }, issues);
   const dbPath = String(env.DB_PATH || './data/fahim.sqlite').trim();
   if (!geminiModel) issues.push('GEMINI_MODEL cannot be empty.');
   if (!dbPath) issues.push('DB_PATH cannot be empty.');
@@ -38,8 +33,7 @@ function loadConfig(env = process.env) {
     dbPath: dbPath || './data/fahim.sqlite',
     geminiApiKey: String(env.GEMINI_API_KEY || '').trim(),
     geminiModel: geminiModel || 'gemini-3.5-flash-lite',
-    geminiQuota: { maxRpm: geminiMaxRpm, maxTpm: geminiMaxTpm, maxRpd: geminiMaxRpd, dailySoftLimit: geminiDailySoftLimit, dailyHardLimit: geminiDailyHardLimit },
-    geminiTimeoutMs: readNumber(env, 'GEMINI_TIMEOUT_MS', 30000, { min: 1000, max: 300000, integer: true }, issues),
+    geminiTimeoutMs: readNumber(env, 'GEMINI_TIMEOUT_MS', 15000, { min: 1000, max: 300000, integer: true }, issues),
     agent: {
       recentMessageLimit: readNumber(env, 'AGENT_RECENT_MESSAGE_LIMIT', 8, { min: 2, max: 30, integer: true }, issues),
       contextTokenBudget: readNumber(env, 'AGENT_CONTEXT_TOKEN_BUDGET', 6000, { min: 512, max: 50000, integer: true }, issues),

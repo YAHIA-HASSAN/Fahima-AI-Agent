@@ -7,12 +7,12 @@ The MVP focuses on making business records easy to enter and understand. It is n
 ## What it does
 
 - Conversational chat in Egyptian Arabic, with a text composer and optional browser-based speech input/output.
-- A confirmation step before a transaction or a newly suggested project fact is saved.
+- A confirmation step before a transaction or a newly suggested project fact is saved; multiple clear operations in one message can be reviewed and confirmed together.
 - Multiple projects, each with separate conversations, confirmed facts, transactions, products, stock, and reminders.
 - Deterministic summaries and reports calculated from SQLite records.
 - A lightweight PDF report flow from the interface.
 - Gemini-powered intent extraction for free-form messages when GEMINI_API_KEY is configured; requests without a key receive a clear error instead of a misleading local guess.
-- Local Gemini quota safeguards and bounded retry behavior for temporary rate limits.
+- Gemini enforces its own usage limits; when Gemini reports a limit, Faheema tells the user it is temporarily unavailable.
 
 ## Requirements
 
@@ -63,18 +63,13 @@ npm run doctor
 | --- | --- | --- |
 | `GEMINI_API_KEY` | empty | Server-side key for Gemini. Never expose it in frontend code. |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini text model used for intent extraction. |
-| `GEMINI_MAX_RPM` | `15` | Local requests-per-minute ceiling. |
-| `GEMINI_MAX_TPM` | `250000` | Local estimated tokens-per-minute ceiling. |
-| `GEMINI_MAX_RPD` | `500` | Local requests-per-day ceiling. |
-| `GEMINI_DAILY_SOFT_LIMIT` | `450` | Local daily stop that reserves quota headroom. |
-| `GEMINI_DAILY_HARD_LIMIT` | `490` | Local absolute daily ceiling. |
-| `GEMINI_TIMEOUT_MS` | `30000` | Gemini request timeout. |
+| `GEMINI_TIMEOUT_MS` | `15000` | Gemini request timeout. Restart the server after changing `.env`, including the API key. |
 | `AGENT_RECENT_MESSAGE_LIMIT` | `8` | Recent conversation messages included in agent context. |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate working-context budget. |
 | `PORT` | `3000` | HTTP server port. |
 | `DB_PATH` | `./data/fahim.sqlite` | SQLite database file path. |
 
-The quota guard is a local safeguard, not a live view of Google's quota. Limits depend on the Gemini API project and can change independently.
+Gemini controls the actual service quota. Faheema does not impose an additional local request or daily-use quota. When Gemini returns HTTP 429, the assistant responds that it is temporarily unavailable.
 
 ## Architecture
 
@@ -134,7 +129,6 @@ server/
   business.js       Projects, conversations, facts, transactions, products, inventory
   finance.js        Amount/date parsing and deterministic finance summaries
   gemini-client.js  Gemini SDK calls and structured response parsing
-  gemini-quota.js   SQLite-backed quota tracking and request safeguards
   config.js         Environment configuration and validation
   db.js             SQLite connection and additive schema migrations
 public/

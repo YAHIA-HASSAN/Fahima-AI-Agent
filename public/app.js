@@ -71,7 +71,7 @@ function renderConversation(messages) {
       "أهلًا بيكي 🌿 احكيلي بصوتك عن مشروعك أو اسأليني عن حساباته. هسألك عن أي معلومة ناقصة، ومش هسجل حاجة غير لما تأكديها.",
       "assistant",
     );
-  else
+  else {
     messages.forEach((m) =>
       addMessage(
         m.content,
@@ -79,6 +79,9 @@ function renderConversation(messages) {
         m.input_type === "voice",
       ),
     );
+    lastReplyText = [...messages].reverse().find((m) => m.role === "assistant")?.content || "";
+    playReplyButton.hidden = !lastReplyText;
+  }
 }
 async function load() {
   const projects = (await api("/api/projects")).projects;
@@ -145,7 +148,11 @@ async function sendMessage(text, inputType = "text") {
       setReplyBusy(false);
       return false;
     }
-    if (result.reply) addMessage(result.reply);
+    if (result.reply) {
+      addMessage(result.reply);
+      lastReplyText = result.reply;
+      playReplyButton.hidden = false;
+    }
     if (result.kind === "report") await downloadReport(result.period.from, result.period.to);
     if (result.reply) playReplyWithGemini(result.reply, true);
     else setReplyBusy(false);
@@ -409,6 +416,7 @@ let generatedAudioText = "";
 async function playReplyWithGemini(text, autoPlay = false) {
   const clean = String(text || "").trim();
   if (!clean) { setReplyBusy(false); return; }
+  if (generatedAudio) generatedAudio.pause();
   setReplyBusy(true);
   playReplyButton.disabled = true;
   playReplyButton.textContent = "⏳ بجهز الصوت…";
@@ -429,12 +437,13 @@ async function playReplyWithGemini(text, autoPlay = false) {
     generatedAudioUrl = URL.createObjectURL(audioBlob);
     generatedAudio = new Audio(generatedAudioUrl);
     generatedAudioText = clean;
-    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي."; setReplyBusy(false); };
+    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي. تقدري تسمعيه تاني من الزر."; playReplyButton.textContent = "🔁 اسمعي الرد تاني"; setReplyBusy(false); };
     generatedAudio.onerror = () => { $("#recording-status").textContent = "تعذر تشغيل الصوت."; setReplyBusy(false); };
     if (autoPlay) {
       try {
         await generatedAudio.play();
         $("#recording-status").textContent = "فهيمه بتقرأ الرد بصوت عربي.";
+        playReplyButton.textContent = "🔁 اسمعي الرد تاني";
       } catch {
         playReplyButton.textContent = "▶️ شغلي الرد";
         $("#recording-status").textContent = "المتصفح منع التشغيل التلقائي. الصوت جاهز؛ اضغطي الزر للتشغيل.";
@@ -444,7 +453,7 @@ async function playReplyWithGemini(text, autoPlay = false) {
       $("#recording-status").textContent = "الصوت جاهز.";
     }
   } catch (error) {
-    $("#recording-status").textContent = error.message || "تعذر تشغيل صوت Gemini. الرد النصي موجود.";
+    $("#recording-status").textContent = error.message || "تعذر تجهيز صوت Gemini. الرد النصي موجود، وجربي زر إعادة السماع.";
     setReplyBusy(false);
   } finally {
     playReplyButton.disabled = false;

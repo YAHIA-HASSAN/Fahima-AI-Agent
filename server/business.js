@@ -1,8 +1,17 @@
 const db = require('./db');
 const { TYPES, summary, validTransaction } = require('./finance');
 
+function cairoParts(date = new Date()) {
+  return Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date).map(part=>[part.type,part.value]));
+}
 function localDate(date = new Date()) {
-  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+  const {year,month,day}=cairoParts(date);
+  return `${year}-${month}-${day}`;
+}
+function shiftCalendarDay(date, days) {
+  const {year,month,day}=cairoParts(date);
+  const shifted=new Date(Date.UTC(Number(year),Number(month)-1,Number(day)+days));
+  return shifted.toISOString().slice(0,10);
 }
 function getProject(id) {
   const numericId = Number(id || 1);
@@ -30,15 +39,16 @@ function getTransactions(projectId, from, to) {
 }
 function periodBounds(period = 'today', date = new Date()) {
   const end = localDate(date);
-  if (period === 'week') { const start = new Date(date); start.setDate(start.getDate()-6); return { from: localDate(start), to: end }; }
-  if (period === 'month') return { from: `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-01`, to: end };
+  if (period === 'week') return { from: shiftCalendarDay(date,-6), to: end };
+  if (period === 'month') return { from: `${end.slice(0,7)}-01`, to: end };
   if (period === 'all') return { from: '0001-01-01', to: end };
   return { from: end, to: end };
 }
 function getSummary(projectId, from, to) { return summary(getTransactions(projectId,from,to)); }
 function formatSummary(s, periodLabel = 'الفترة') {
-  if (!s.sufficient) return `مافيش معاملات مسجلة في ${periodLabel}، فمش عندي أرقام كفاية للملخص.`;
-  return `في ${periodLabel} سجلنا مبيعات بـ${s.totals.income} جنيه${s.estimatedTotals.income ? `، ومبيعات تقديرية بـ${s.estimatedTotals.income} جنيه` : ''} من ${s.saleCount} عملية بيع. المشتريات أو الإنتاج المسجل ${s.totals.stock_cost} جنيه، ومصاريف التشغيل ${s.totals.operating_expense} جنيه${s.estimatedTotals.stock_cost || s.estimatedTotals.operating_expense ? '، وفيه كمان مبالغ تقديرية' : ''}. دي مجاميع المسجل فقط، ومش حساب ربح.`;
+  const number=(value)=>Number(value||0).toLocaleString('ar-EG');
+  if (!s.sufficient) return `مافيش عمليات متسجلة في ${periodLabel}، فمش عندي أرقام كفاية للملخص.`;
+  return `في ${periodLabel}: دخل من البيع ${number(s.totals.income)} جنيه، وشراء بضاعة ${number(s.totals.stock_cost)} جنيه، ومصاريف ${number(s.totals.operating_expense)} جنيه. ${s.estimatedTotals.income||s.estimatedTotals.stock_cost||s.estimatedTotals.operating_expense?'فيه كمان أرقام تقديرية. ':''}دي الأرقام اللي اتسجلت بس؛ ماقدرش أحدد المكسب بدقة من غير تكلفة البضاعة اللي اتباعت.`;
 }
 function getProducts(projectId) {
   return db.prepare('SELECT * FROM products WHERE project_id=? ORDER BY name COLLATE NOCASE').all(projectId);

@@ -8,7 +8,7 @@ Faheema is a local-first Arabic business assistant built with Node.js, Express, 
 
 - `server/index.js`: Express routes and request orchestration.
 - `server/agent.js`: Gemini prompt, structured intent schema, and fallback/domain handling.
-- `server/gemini-client.js`, `server/gemini-quota.js`, `server/config.js`: provider client, quota safeguards, and configuration.
+- `server/gemini-client.js`, `server/config.js`: Gemini provider client and configuration.
 - `server/business.js`, `server/business-tools.js`, `server/finance.js`: project-scoped business rules, allowlisted reads, and financial calculations.
 - `server/db.js`: SQLite schema and migrations.
 - `public/`: Arabic interface, chat, browser speech, and report generation.
@@ -18,8 +18,11 @@ Faheema is a local-first Arabic business assistant built with Node.js, Express, 
 
 - Keep all database access and writes on the server. Scope every business operation to the selected project.
 - Treat Gemini output as untrusted structured input. Validate it and use only allowlisted operations; require explicit confirmation before committing transactions or project facts.
+- Keep replies in short, everyday Egyptian Arabic for users with little reading or financial experience. Ask at most one clear question per turn, explain unavoidable terms plainly, and repeat important amounts for confirmation.
+- Extract every clearly stated sale, purchase, and expense in a multi-operation message. Keep each operation separate, ask for missing details one at a time, and commit the batch only after explicit confirmation.
+- Use Cairo calendar dates for business transactions and reporting.
 - Keep stored records as the source of truth for totals and inventory. Do not present revenue minus purchases/expenses as net profit unless cost of goods sold is actually known.
-- Never put `GEMINI_API_KEY` or other secrets in browser code, logs, tests, or committed files. Read configuration from environment variables.
+- Never put `GEMINI_API_KEY` or other secrets in browser code, logs, tests, or committed files. Read configuration from environment variables. Do not impose local Gemini usage caps; show a temporary unavailable message when Gemini itself rejects requests for quota.
 - Preserve Arabic copy and right-to-left behavior in the interface. Browser speech recognition and speech synthesis are optional; text chat must remain usable when either API is unavailable.
 - Avoid unrelated changes to SQLite data files, migrations, or generated artifacts.
 
