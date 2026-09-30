@@ -16,7 +16,7 @@ The MVP focuses on making business records easy to enter and understand. It is n
 
 ## Requirements
 
-- Node.js 20 or later (npm is included with Node.js).
+-  [Node.js](https://nodejs.org/en/download) 20 or later (npm is included with Node.js). 
 - Windows, macOS, or Linux.
 - A Gemini API key for Gemini-powered natural-language understanding. Text chat and locally supported deterministic behavior remain available without a key, but free-form understanding is limited.
 - A modern browser. Speech recognition availability depends on the browser and operating system.
