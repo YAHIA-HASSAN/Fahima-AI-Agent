@@ -1,0 +1,747 @@
+const TYPES = {
+  income: "مبيعات / إيرادات",
+  stock_cost: "مشتريات أو تكلفة إنتاج",
+  operating_expense: "مصروف تشغيل",
+  withdrawal: "مسحوبات للبيت",
+};
+const $ = (s) => document.querySelector(s);
+let state = null,
+  conversation = null,
+  profileIndex = 0,
+  speechFeedback = "",
+  lastReplyText = "",
+  voiceAvailable = false,
+  voiceMode = "ready";
+const escapeHtml = (s) =>
+  String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+const money = (n) =>
+  `${new Intl.NumberFormat("ar-EG", { maximumFractionDigits: 2 }).format(Number(n) || 0)} جنيه`;
+async function appFetch(url, options) {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    if (error instanceof TypeError || /failed to fetch|networkerror/i.test(error?.message || "")) {
+      throw Error("الاتصال بفهيمه انقطع مؤقتًا. انتظري اكتمال تشغيله ثم أرسلي الرسالة مرة أخرى.");
+    }
+    throw error;
+  }
+}
+async function api(url, options = {}) {
+  const headers = {
+    ...(options.body instanceof FormData
+      ? {}
+      : { "Content-Type": "application/json" }),
+    ...(options.headers || {}),
+  };
+  const r = await appFetch(url, { ...options, headers });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Error(data.error || "حصلت مشكلة. جربي تاني.");
+  return data;
+}
+function addMessage(text, who = "assistant", voice = false) {
+  const el = document.createElement("div");
+  el.className = `bubble ${who}`;
+  el.textContent = text;
+  if (voice && who === "user") {
+    const mark = document.createElement("small");
+    mark.textContent = " · رسالة صوتية";
+    el.append(mark);
+  }
+  $("#messages").append(el);
+  $("#messages").scrollTop = $("#messages").scrollHeight;
+  return el;
+}
+function renderConversation(messages) {
+  $("#messages").replaceChildren();
+  if (!messages?.length)
+    addMessage(
+      "أهلًا بيكي 🌿 احكيلي بصوتك عن مشروعك أو اسأليني عن حساباته. هسألك عن أي معلومة ناقصة، ومش هسجل حاجة غير لما تأكديها.",
+      "assistant",
+    );
+  else
+    messages.forEach((m) =>
+      addMessage(
+        m.content,
+        m.role === "user" ? "user" : "assistant",
+        m.input_type === "voice",
+      ),
+    );
+}
+async function load() {
+  const projects = (await api("/api/projects")).projects;
+  let id = Number(localStorage.getItem("faheemaProject") || localStorage.getItem("fahimProject") || 1);
+  if (!projects.some((p) => p.id === id)) id = projects[0]?.id || 1;
+  localStorage.setItem("faheemaProject", id);
+  $("#project-select").innerHTML = projects
+    .map(
+      (p) =>
+        `<option value="${p.id}" ${p.id === id ? "selected" : ""}>${escapeHtml(p.name)}</option>`,
+    )
+    .join("");
+  state = await api(`/api/init?projectId=${id}`);
+  conversation = await api(
+    `/api/conversation?projectId=${id}&conversationId=${state.conversationId}`,
+  );
+  $("#from").value = state.period.from;
+  $("#to").value = state.period.to;
+  renderConversation(conversation.messages);
+  renderFacts(state.facts);
+  renderProfileStep();
+  await voiceStatus();
+}
+function renderFacts(facts) {
+  $("#facts-list").innerHTML = facts?.length
+    ? facts
+        .map(
+          (f) =>
+            `<div class="fact-row"><div><strong>${escapeHtml(f.key)}</strong><span>${escapeHtml(f.value)}</span></div><button class="delete" data-fact-delete="${f.id}" aria-label="حذف المعلومة">×</button></div>`,
+        )
+        .join("")
+    : '<p class="note">لسه مفيش معلومات إضافية محفوظة. بيانات ملف المشروع تفضل منفصلة هنا.</p>';
+  document.querySelectorAll("[data-fact-delete]").forEach(
+    (b) =>
+      (b.onclick = async () => {
+        await api(
+          `/api/project-facts/${b.dataset.factDelete}?projectId=${state.project.id}`,
+          { method: "DELETE" },
+        );
+        await load();
+      }),
+  );
+}
+async function sendMessage(text, inputType = "text") {
+  const clean = String(text || "").trim();
+  if (!clean) return false;
+  addMessage(clean, "user", inputType === "voice");
+  const loading = addMessage("بفكر في كلامك…");
+  try {
+    const result = await api("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        message: clean,
+        inputType,
+        projectId: state.project.id,
+        conversationId: conversation.conversation.id,
+        requestId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      }),
+    });
+    loading.remove();
+    if (result.error) {
+      addMessage(result.error).classList.add("error");
+      return false;
+    }
+    if (result.reply) addMessage(result.reply);
+    if (result.kind === "report") await downloadReport(result.period.from, result.period.to);
+    if (result.reply) speechAfterReply(result.reply, inputType === "voice");
+    return Boolean(result.reply);
+  } catch (e) {
+    loading.remove();
+    addMessage(e.message).classList.add("error");
+    return false;
+  }
+}
+$("#message-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = $("#message-text");
+  const button = $("#send-text");
+  const text = input.value.trim();
+  if (!text || button.disabled) return;
+  button.disabled = true;
+  try {
+    if (await sendMessage(text, "text")) input.value = "";
+  } finally {
+    button.disabled = false;
+    input.focus();
+  }
+});
+$("#profile-toggle").onclick = () =>
+  ($("#profile-panel").hidden = !$("#profile-panel").hidden);
+$("#memory-toggle").onclick = () =>
+  ($("#memory-panel").hidden = !$("#memory-panel").hidden);
+const profileSteps = [
+  [
+    "activity",
+    "نوع النشاط",
+    "مثال: خياطة أو تجارة ملابس أو تربية دواجن",
+    "text",
+  ],
+  [
+    "products",
+    "إيه المنتجات أو الحيوانات اللي شغالة فيها؟",
+    "مثال: عبايات أو فراخ بلدي",
+    "text",
+  ],
+  [
+    "capital",
+    "عارفة المبلغ المتاح للمشروع؟ (اختياري)",
+    "اكتبي المبلغ بالجنيه لو تعرفيه",
+    "number",
+  ],
+  ["costs", "إيه تكاليف الشراء أو الإنتاج؟", "مثال: قماش أو علف", "text"],
+  [
+    "sales_method",
+    "بتبيعي إزاي وإمتى؟",
+    "مثال: من البيت أو السوق يوم الجمعة",
+    "text",
+  ],
+  [
+    "household_use",
+    "بتستخدمي جزء من دخل المشروع للبيت؟",
+    "اختاري إجابة مناسبة ليكي",
+    "select",
+  ],
+];
+function renderProfileStep() {
+  const step = profileSteps[profileIndex];
+  if (!step || !state) return;
+  const value = state.project[step[0]];
+  $("#profile-step").innerHTML =
+    `<p class="step-count">السؤال ${profileIndex + 1} من ${profileSteps.length}</p><label class="step-label">${step[1]}${step[3] === "select" ? `<select id="step-value"><option value="">اختاري</option><option value="yes">أيوه</option><option value="sometimes">أحيانًا</option><option value="no">لأ</option></select>` : `<input id="step-value" type="${step[3]}" ${step[3] === "number" ? 'min="0" step="0.01"' : ""} placeholder="${step[2]}">`}</label><div class="step-actions"><button id="step-save" class="primary">حفظ واللي بعده</button><button id="step-skip" class="quiet">تخطي</button><button id="step-back" class="quiet" ${profileIndex === 0 ? "disabled" : ""}>السابق</button></div>`;
+  if (value) $("#step-value").value = value;
+  $("#step-save").onclick = async () => {
+    const raw = $("#step-value").value.trim();
+    if (step[0] === "activity" && !raw) {
+      addMessage("اكتبي نوع النشاط أو اختاري تخطي.").classList.add("error");
+      return;
+    }
+    const val =
+      step[0] === "capital" ? (raw ? Number(raw) : null) : raw || null;
+    try {
+      await api("/api/project", {
+        method: "PUT",
+        body: JSON.stringify({ id: state.project.id, [step[0]]: val }),
+      });
+      profileIndex = Math.min(profileIndex + 1, profileSteps.length - 1);
+      await load();
+    } catch (e) {
+      addMessage(e.message).classList.add("error");
+    }
+  };
+  $("#step-skip").onclick = () => {
+    profileIndex = Math.min(profileIndex + 1, profileSteps.length - 1);
+    renderProfileStep();
+  };
+  $("#step-back").onclick = () => {
+    profileIndex = Math.max(0, profileIndex - 1);
+    renderProfileStep();
+  };
+}
+$("#fact-form").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/project-facts", {
+      method: "POST",
+      body: JSON.stringify({
+        projectId: state.project.id,
+        key: $("#fact-key").value,
+        value: $("#fact-value").value,
+      }),
+    });
+    e.target.reset();
+    await load();
+  } catch (err) {
+    addMessage(err.message).classList.add("error");
+  }
+};
+$("#clear-facts").onclick = async () => {
+  if (
+    !confirm(
+      "هتمسحي المعلومات المؤكدة من ذاكرة المشروع. المعاملات هتفضل زي ما هي. تكملي؟",
+    )
+  )
+    return;
+  await api(`/api/project-facts?projectId=${state.project.id}`, {
+    method: "DELETE",
+  });
+  await load();
+};
+$("#clear-conversation").onclick = async () => {
+  if (
+    !confirm(
+      "هتمسحي رسائل المحادثة والطلب المعلق فقط. المعاملات وذاكرة المشروع هيفضلوا. تكملي؟",
+    )
+  )
+    return;
+  await api(
+    `/api/conversation/${conversation.conversation.id}?projectId=${state.project.id}`,
+    { method: "DELETE" },
+  );
+  await load();
+};
+$("#project-select").onchange = () => {
+  localStorage.setItem("faheemaProject", $("#project-select").value);
+  profileIndex = 0;
+  load();
+};
+$("#new-project").onclick = async () => {
+  const name = prompt("اكتبي اسم بسيط للمشروع:");
+  if (!name?.trim()) return;
+  try {
+    const r = await api("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    localStorage.setItem("faheemaProject", r.project.id);
+    $("#profile-panel").hidden = false;
+    profileIndex = 0;
+    await load();
+  } catch (e) {
+    addMessage(e.message).classList.add("error");
+  }
+};
+$("#delete-project").onclick = async () => {
+  const name = state?.project?.name || "المشروع الحالي";
+  if (!confirm(`هتحذفي «${name}» وكل بياناته ومحادثاته ومخزونه نهائيًا. لا يمكن التراجع. متأكدة؟`)) return;
+  const button = $("#delete-project");
+  button.disabled = true;
+  try {
+    await api(`/api/projects/${state.project.id}`, { method: "DELETE" });
+    localStorage.removeItem("faheemaProject");
+    localStorage.removeItem("fahimProject");
+    await load();
+  } catch (e) {
+    addMessage(e.message).classList.add("error");
+  } finally {
+    button.disabled = false;
+  }
+};
+const recordButton = $("#record-voice");
+const playReplyButton = $("#play-reply");
+const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
+const browserSpeech = window.speechSynthesis || null;
+let recognition = null;
+let finalTranscript = "";
+let submittedTranscript = "";
+let submittedAt = 0;
+let ttsVoices = [];
+function setVoiceMode(mode, message) {
+  voiceMode = mode;
+  const labels = { ready: "🎤 اتكلمي", starting: "⏳ بجهز السماع…", recording: "⏹ إيقاف وإرسال", processing: "⏳ ثانية واحدة…" };
+  recordButton.hidden = false;
+  recordButton.textContent = labels[mode] || labels.ready;
+  recordButton.disabled = mode === "starting" || mode === "processing" || !voiceAvailable;
+  recordButton.classList.toggle("recording", mode === "recording");
+  recordButton.setAttribute("aria-pressed", String(mode === "recording"));
+  $("#recording-status").textContent = message || ({ ready: voiceAvailable ? "اضغطي واتكلمي، واضغطي تاني لما تخلصي." : "الصوت مش متاح هنا، اكتبي رسالتك عادي.", starting: "بجهز الميكروفون…", recording: "سامعاكي… اضغطي لإيقاف الكلام وإرساله.", processing: "بحضّر الرد…" }[mode] || "");
+}
+function refreshBrowserVoices() {
+  ttsVoices = browserSpeech?.getVoices?.() || [];
+}
+if (browserSpeech) {
+  refreshBrowserVoices();
+  browserSpeech.addEventListener?.("voiceschanged", refreshBrowserVoices);
+  browserSpeech.onvoiceschanged = refreshBrowserVoices;
+}
+function voiceStatus() {
+  voiceAvailable = Boolean(SpeechRecognitionApi);
+  $("#voice-status").textContent = voiceAvailable ? "الصوت من المتصفح · النص يروح للمساعد" : "الصوت مش متاح في المتصفح · الكتابة متاحة";
+  $("#voice-status").classList.toggle("voice-offline", !voiceAvailable);
+  setVoiceMode("ready");
+}
+function createRecognition() {
+  if (!SpeechRecognitionApi) return null;
+  const instance = new SpeechRecognitionApi();
+  instance.lang = "ar-EG";
+  instance.continuous = false;
+  instance.interimResults = true;
+  instance.onstart = () => setVoiceMode("recording", "سامعاكي… اضغطي لإيقاف الكلام وإرساله.");
+  instance.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const phrase = event.results[i][0]?.transcript || "";
+      if (event.results[i].isFinal) finalTranscript += phrase + " ";
+      else interim += phrase;
+    }
+    if (interim) $("#recording-status").textContent = `سامعاكي: ${interim}`;
+  };
+  instance.onerror = (event) => {
+    const messages = { "not-allowed": "محتاجين تسمحي لِفهيمه تستخدم الميكروفون.", "service-not-allowed": "خدمة الصوت مش متاحة في المتصفح ده. اكتبي رسالتك عادي.", "no-speech": "مسمعتش حاجة، حاولي تاني." };
+    speechFeedback = messages[event.error] || "الصوت وقف. تقدري تكتبي رسالتك عادي.";
+    if (event.error !== "no-speech") addMessage(speechFeedback).classList.add("error");
+  };
+  instance.onend = async () => {
+    const text = finalTranscript.trim();
+    finalTranscript = "";
+    if (!text) { setVoiceMode("ready", speechFeedback || "مسمعتش كلام واضح، حاولي تاني."); return; }
+    const now = Date.now();
+    if (text === submittedTranscript && now - submittedAt < 5000) { setVoiceMode("ready", "وصلت الرسالة قبل كده."); return; }
+    submittedTranscript = text;
+    submittedAt = now;
+    setVoiceMode("processing", "ثانية واحدة…");
+    const success = await sendMessage(text, "voice");
+    setVoiceMode("ready", success ? "خلصنا. تقدري تقولي رسالة جديدة." : "الرد النصي موجود. جربي تاني أو اكتبي رسالتك.");
+  };
+  return instance;
+}
+recordButton.addEventListener("click", () => {
+  if (!voiceAvailable || voiceMode === "starting" || voiceMode === "processing") return;
+  if (voiceMode === "recording") {
+    setVoiceMode("processing", "ثانية واحدة…");
+    recognition?.stop();
+    return;
+  }
+  browserSpeech?.cancel();
+  speechFeedback = "";
+  finalTranscript = "";
+  recognition = createRecognition();
+  setVoiceMode("starting");
+  try { recognition.start(); }
+  catch { setVoiceMode("ready", "مش قادرة أفتح الميكروفون دلوقتي. جربي تاني أو اكتبي."); }
+});
+playReplyButton.addEventListener("click", () => speechAfterReply(lastReplyText, true));
+function speechAfterReply(text, autoplay = false) {
+  lastReplyText = String(text || "").trim();
+  if (!lastReplyText || !browserSpeech || !window.SpeechSynthesisUtterance) {
+    if (lastReplyText) $("#recording-status").textContent = "الرد مكتوب؛ الصوت مش متاح على الجهاز.";
+    return;
+  }
+  playReplyButton.hidden = false;
+  playReplyButton.textContent = "🔊 اسمعي الرد";
+  if (!autoplay) return;
+  browserSpeech.cancel();
+  refreshBrowserVoices();
+  const utterance = new SpeechSynthesisUtterance(lastReplyText);
+  const arabic = ttsVoices.filter((voice) => /^ar(?:-|$)/i.test(voice.lang || ""));
+  utterance.voice = arabic.find((voice) => /^ar-EG$/i.test(voice.lang)) || arabic[0] || ttsVoices[0] || null;
+  utterance.lang = utterance.voice?.lang || "ar-EG";
+  utterance.onstart = () => { voiceMode = "speaking"; $("#recording-status").textContent = "فهيمه بتتكلم دلوقتي."; };
+  utterance.onend = () => { if (voiceMode === "speaking") setVoiceMode("ready", "خلص الرد. تقدري تسجلي رسالة جديدة."); };
+  utterance.onerror = () => { $("#recording-status").textContent = "الرد مكتوب، بس الصوت مش متاح. تقدري تكملي كتابة أو كلام."; };
+  browserSpeech.speak(utterance);
+}
+voiceStatus();
+function drawRtl(
+  ctx,
+  text,
+  x,
+  y,
+  maxWidth,
+  font = "24px Cairo, Tahoma, sans-serif",
+  color = "#263a34",
+  maxLines = 3,
+) {
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "top";
+  ctx.direction = "rtl";
+  const words = String(text ?? "").split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (line && ctx.measureText(candidate).width > maxWidth) {
+      lines.push(line);
+      line = word;
+      if (lines.length >= maxLines - 1) break;
+    } else line = candidate;
+  }
+  if (line) lines.push(line);
+  const printed = lines.slice(0, maxLines);
+  if (
+    words.length &&
+    printed.length === maxLines &&
+    ctx.measureText(printed.at(-1)).width > maxWidth
+  )
+    printed[printed.length - 1] = printed.at(-1).slice(0, -1) + "…";
+  printed.forEach((item, i) => ctx.fillText(item, x, y + i * 34, maxWidth));
+  return y + printed.length * 34;
+}
+function reportCanvas(report, rows, pageNumber, totalPages, isFirst) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1240;
+  canvas.height = 1754;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#146c5a";
+  ctx.fillRect(0, 0, canvas.width, 220);
+  drawRtl(
+    ctx,
+    "فهيمه · تقرير المشروع",
+    1140,
+    48,
+    1040,
+    "bold 48px Cairo, Tahoma, sans-serif",
+    "#fff",
+    1,
+  );
+  drawRtl(
+    ctx,
+    report.project.name,
+    1140,
+    118,
+    1040,
+    "28px Cairo, Tahoma, sans-serif",
+    "#e8f4ef",
+    1,
+  );
+  drawRtl(
+    ctx,
+    `الفترة: ${report.period.from} إلى ${report.period.to}`,
+    1140,
+    270,
+    1050,
+    "26px Cairo, Tahoma, sans-serif",
+    "#263a34",
+    1,
+  );
+  if (report.project.activity)
+    drawRtl(
+      ctx,
+      `النشاط: ${report.project.activity}`,
+      1140,
+      315,
+      1050,
+      "23px Cairo, Tahoma, sans-serif",
+      "#687873",
+      1,
+    );
+  let startY = 375;
+  if (isFirst) {
+    const s = report.summary;
+    const cards = [
+      ["المبيعات المسجلة", s.totals.income],
+      ["المشتريات / الإنتاج", s.totals.stock_cost],
+      ["مصروفات التشغيل", s.totals.operating_expense],
+      ["المسحوبات للبيت", s.totals.withdrawal],
+    ];
+    cards.forEach(([label, value], i) => {
+      const col = i % 2,
+        row = Math.floor(i / 2),
+        x = 650 - col * 560,
+        y = 375 + row * 150;
+      ctx.fillStyle = "#f1f7f3";
+      ctx.fillRect(x, y, 520, 126);
+      drawRtl(
+        ctx,
+        label,
+        x + 480,
+        y + 16,
+        460,
+        "21px Cairo, Tahoma, sans-serif",
+        "#687873",
+        1,
+      );
+      drawRtl(
+        ctx,
+        money(value),
+        x + 480,
+        y + 58,
+        460,
+        "bold 30px Cairo, Tahoma, sans-serif",
+        "#146c5a",
+        1,
+      );
+    });
+    drawRtl(
+      ctx,
+      `عدد عمليات البيع المسجلة: ${s.saleCount}`,
+      1140,
+      700,
+      1050,
+      "23px Cairo, Tahoma, sans-serif",
+      "#263a34",
+      1,
+    );
+    drawRtl(
+      ctx,
+      "المجاميع تعكس البيانات المسجلة فقط. لا يتضمن التقرير حساب صافي الربح؛ فقد تظل المشتريات ضمن المخزون ولا تتوفر دائمًا تكلفة البضاعة المباعة.",
+      1140,
+      744,
+      1050,
+      "20px Cairo, Tahoma, sans-serif",
+      "#687873",
+      3,
+    );
+    startY = 860;
+  } else startY = 375;
+  drawRtl(
+    ctx,
+    "تفاصيل العمليات",
+    1140,
+    startY,
+    1050,
+    "bold 27px Cairo, Tahoma, sans-serif",
+    "#146c5a",
+    1,
+  );
+  let y = startY + 55;
+  if (!rows.length && isFirst)
+    drawRtl(
+      ctx,
+      "لا توجد معاملات مسجلة خلال هذه الفترة.",
+      1140,
+      y,
+      1050,
+      "22px Cairo, Tahoma, sans-serif",
+      "#687873",
+      1,
+    );
+  rows.forEach((item, index) => {
+    const top = y + index * 105;
+    ctx.fillStyle = index % 2 ? "#fff" : "#f8faf9";
+    ctx.fillRect(70, top - 8, 1100, 98);
+    drawRtl(
+      ctx,
+      `${item.date} · ${TYPES[item.type]}${item.estimated ? " · تقديري" : ""}`,
+      1115,
+      top + 6,
+      780,
+      "19px Cairo, Tahoma, sans-serif",
+      "#687873",
+      1,
+    );
+    drawRtl(
+      ctx,
+      item.description,
+      1115,
+      top + 40,
+      790,
+      "21px Cairo, Tahoma, sans-serif",
+      "#263a34",
+      2,
+    );
+    ctx.font = "bold 21px Cairo, Tahoma, sans-serif";
+    ctx.fillStyle = "#146c5a";
+    ctx.textAlign = "left";
+    ctx.direction = "rtl";
+    ctx.fillText(money(item.amount), 100, top + 29, 245);
+  });
+  drawRtl(
+    ctx,
+    `فهيمه · صفحة ${pageNumber} من ${totalPages}`,
+    1140,
+    1685,
+    1050,
+    "18px Cairo, Tahoma, sans-serif",
+    "#687873",
+    1,
+  );
+  return canvas;
+}
+async function canvasJpeg(canvas) {
+  const blob = await new Promise((resolve) =>
+    canvas.toBlob(resolve, "image/jpeg", 0.94),
+  );
+  if (!blob) throw Error("تعذر تجهيز صفحة PDF.");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+async function createReportPdf(report) {
+  await document.fonts?.ready;
+  const pages = [];
+  const firstRows = report.transactions.slice(0, 7);
+  pages.push({ rows: firstRows, first: true });
+  const remaining = report.transactions.slice(7);
+  for (let i = 0; i < remaining.length; i += 12)
+    pages.push({ rows: remaining.slice(i, i + 12), first: false });
+  const jpegPages = [];
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    jpegPages.push(
+      await canvasJpeg(
+        reportCanvas(report, page.rows, i + 1, pages.length, page.first),
+      ),
+    );
+  }
+  const encoder = new TextEncoder(),
+    parts = [];
+  let byteLength = 0;
+  const append = (part) => {
+    parts.push(part);
+    byteLength += part.length;
+  };
+  const ascii = (s) => encoder.encode(s);
+  append(ascii("%PDF-1.4\n% Faheema PDF\n"));
+  const offsets = [];
+  const addObject = (id, content) => {
+    offsets[id] = byteLength;
+    append(ascii(`${id} 0 obj\n`));
+    for (const part of content)
+      append(typeof part === "string" ? ascii(part) : part);
+    append(ascii("\nendobj\n"));
+  };
+  const pageRefs = pages.map((_, i) => `${3 + i * 3} 0 R`).join(" ");
+  addObject(1, ["<< /Type /Catalog /Pages 2 0 R >>"]);
+  addObject(2, [
+    `<< /Type /Pages /Kids [${pageRefs}] /Count ${pages.length} >>`,
+  ]);
+  for (let i = 0; i < pages.length; i++) {
+    const pageId = 3 + i * 3,
+      imageId = pageId + 1,
+      contentId = pageId + 2,
+      jpeg = jpegPages[i],
+      stream = `q\n595.28 0 0 841.89 0 0 cm\n/Im0 Do\nQ`;
+    addObject(pageId, [
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /XObject << /Im0 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`,
+    ]);
+    addObject(imageId, [
+      `<< /Type /XObject /Subtype /Image /Width 1240 /Height 1754 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
+      jpeg,
+      "\nendstream",
+    ]);
+    addObject(contentId, [
+      `<< /Length ${encoder.encode(stream).length} >>\nstream\n${stream}\nendstream`,
+    ]);
+  }
+  const xrefOffset = byteLength;
+  append(
+    ascii(
+      `xref\n0 ${offsets.length}\n0000000000 65535 f \n${offsets
+        .slice(1)
+        .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+        .join(
+          "",
+        )}trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`,
+    ),
+  );
+  return new Blob(parts, { type: "application/pdf" });
+}
+async function downloadReport(from = state.period.from, to = state.period.to) {
+  const button = $("#report");
+  const original = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = "جاري تجهيز التقرير…";
+  }
+  try {
+    const report = await api(
+      `/api/report?projectId=${state.project.id}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    );
+    const blob = await createReportPdf(report);
+    const url = URL.createObjectURL(blob);
+    const name = `Faheema-report-${report.period.from}-${report.period.to}.pdf`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    const panel = $("#report-panel");
+    panel.hidden = false;
+    panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">تم تجهيز التقرير</p><h2>${escapeHtml(report.project.name)} · ${escapeHtml(report.period.from)} إلى ${escapeHtml(report.period.to)}</h2></div></div><p class="report-body">التقرير جاهز. إذا لم يبدأ تنزيله تلقائيًا، استخدمي الزر بالأسفل. يتضمن المجاميع المسجلة ولا يحسب صافي الربح.</p>`;
+    const fallback = document.createElement("a");
+    fallback.className = "secondary report-download-link";
+    fallback.href = url;
+    fallback.download = name;
+    fallback.textContent = "تنزيل تقرير PDF";
+    panel.append(fallback);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {
+    addMessage(e.message || "تعذر إنشاء التقرير.").classList.add("error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  }
+}
+$("#report").onclick = () => downloadReport($("#from").value, $("#to").value);
+load().catch((e) => addMessage(e.message).classList.add("error"));
