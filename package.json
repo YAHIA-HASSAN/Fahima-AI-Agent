@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node -e \"require('./test/finance.test'); require('./test/agent-architecture.test')\"",
+    "test": "node -e \"require('./test/finance.test'); require('./test/agent-architecture.test'); require('./test/reply-timing.test'); require('./test/data-flow.test')\"",
     "setup": "node scripts/setup.js",
     "doctor": "node scripts/doctor.js"
   },

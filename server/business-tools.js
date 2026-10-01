@@ -49,7 +49,7 @@ function createBusinessTools(projectId, options = {}) {
       execute: ({ cost, markup_percent: markup } = {}) => {
         const unitCost = Number(cost);
         const markupPercent = Number(markup);
-        if (!Number.isFinite(unitCost) || unitCost <= 0 || !Number.isFinite(markupPercent) || markupPercent < 0 || markupPercent > 10000) {
+        if (cost == null || markup == null || !Number.isFinite(unitCost) || unitCost <= 0 || !Number.isFinite(markupPercent) || markupPercent < 0 || markupPercent > 10000) {
           throw new Error('Price estimate inputs are invalid.');
         }
         return { cost: unitCost, markup_percent: markupPercent, price: Math.round(unitCost * (1 + markupPercent / 100) * 100) / 100 };

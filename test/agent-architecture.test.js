@@ -2,50 +2,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const Database = require('better-sqlite3');
 const { loadConfig } = require('../server/config');
 const agent = require('../server/agent');
-const { createQuotaManager, cairoDay } = require('../server/gemini-quota');
 const { createBusinessTools, executeBusinessTool } = require('../server/business-tools');
 
-test('uses the confirmed Gemini Flash-Lite model id and centralized configurable quota settings', () => {
-  const config = loadConfig({});
-  assert.equal(config.geminiModel, 'gemini-3.5-flash-lite');
-  assert.deepEqual(config.geminiQuota, { maxRpm: 15, maxTpm: 250000, maxRpd: 500, dailySoftLimit: 450, dailyHardLimit: 490 });
-  const custom = loadConfig({ GEMINI_MODEL: 'custom-model', GEMINI_MAX_RPM: '10', GEMINI_DAILY_SOFT_LIMIT: '80' });
-  assert.equal(custom.geminiModel, 'custom-model');
-  assert.equal(custom.geminiQuota.maxRpm, 10);
-  assert.equal(custom.geminiQuota.dailySoftLimit, 80);
-});
-
-test('quota manager persists usage and enforces daily, RPM, and estimated TPM safeguards', () => {
-  const db = new Database(':memory:');
-  db.exec(`CREATE TABLE gemini_usage_events (id INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL DEFAULT (datetime('now')), local_day TEXT NOT NULL, estimated_tokens INTEGER NOT NULL DEFAULT 0, prompt_tokens INTEGER, output_tokens INTEGER, status TEXT NOT NULL DEFAULT 'reserved')`);
-  const limits = { maxRpm: 4, maxTpm: 1000, maxRpd: 10, dailySoftLimit: 5, dailyHardLimit: 8 };
-  const quota = createQuotaManager(db, () => limits);
-  const first = quota.reserve(500);
-  quota.finish(first, { status: 'success', promptTokens: 700, outputTokens: 200, actualTokens: 900 });
-  assert.equal(quota.usage().requestsToday, 1);
-  assert.equal(quota.usage().tokens, 900);
-  assert.throws(() => quota.reserve(1), { code: 'LOCAL_GEMINI_RATE_LIMIT' });
-  limits.maxTpm = 3000;
-  quota.reserve(1);
-  quota.reserve(1);
-  assert.throws(() => quota.reserve(1), { code: 'LOCAL_GEMINI_RATE_LIMIT' });
-  db.close();
-});
-
-test('quota counts provider failures and honors the Cairo calendar day', () => {
-  assert.match(cairoDay(), /^\d{4}-\d{2}-\d{2}$/);
-  const db = new Database(':memory:');
-  db.exec(`CREATE TABLE gemini_usage_events (id INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL DEFAULT (datetime('now')), local_day TEXT NOT NULL, estimated_tokens INTEGER NOT NULL DEFAULT 0, prompt_tokens INTEGER, output_tokens INTEGER, status TEXT NOT NULL DEFAULT 'reserved')`);
-  const quota = createQuotaManager(db, () => ({ maxRpm: 10, maxTpm: 10000, maxRpd: 4, dailySoftLimit: 2, dailyHardLimit: 3 }));
-  const id = quota.reserve(7);
-  quota.finish(id, { status: 'provider_429' });
-  quota.reserve(7);
-  assert.equal(quota.usage().requestsToday, 2);
-  assert.throws(() => quota.reserve(7), { code: 'LOCAL_GEMINI_DAILY_LIMIT' });
-  db.close();
+test('model and timeouts are configurable without local Gemini quotas', () => {
+  const config = loadConfig({ GEMINI_MODEL: 'custom-model', GEMINI_TIMEOUT_MS: '25000' });
+  assert.equal(config.geminiModel, 'custom-model');
+  assert.equal(config.geminiTimeoutMs, 25000);
+  assert.equal('geminiQuota' in config, false);
 });
 
 test('conversation summaries compact locally without another Gemini generation', async () => {
@@ -61,29 +26,18 @@ test('conversation summaries compact locally without another Gemini generation',
   agent.__setGeminiClientForTests(null);
 });
 
-test('agent retries one temporary RPM 429 and never retries a daily provider limit', async () => {
+test('provider failures surface immediately without fabricated financial fallback', async () => {
   const oldKey = process.env.GEMINI_API_KEY;
-  const oldModel = process.env.GEMINI_MODEL;
   process.env.GEMINI_API_KEY = 'test-key';
-  process.env.GEMINI_MODEL = 'test-model';
   let attempts = 0;
-  let usageRows = 0;
-  agent.__setQuotaManagerForTests({ reserve: () => ++usageRows, finish: () => {} });
-  const parsed = { intent: 'question', answer: 'تمام', transaction_type: null, amount: null, amount_kind: null, date: '', period: 'today', description: '', estimated: false, product_name: null, quantity: null, unit: null, unit_price: null, markup_percent: null, reminder_title: null, due_date: null, fact_key: null, fact_value: null };
-  agent.__setGeminiClientForTests({ interactions: { async create() { attempts += 1; if (attempts === 1) { const error = new Error('requests per minute; retry shortly'); error.status = 429; throw error; } return { output_text: JSON.stringify(parsed) }; } } });
+  agent.__setGeminiClientForTests({ interactions: { async create() { attempts++; const error = new Error('provider unavailable'); error.status = 429; throw error; } } });
   try {
-    const result = await agent.extract('إزاي أزود مبيعات المحل؟', {});
-    assert.equal(result.intent, 'question');
-    assert.equal(attempts, 2);
-    assert.equal(usageRows, 2);
-    attempts = 0;
-    agent.__setGeminiClientForTests({ interactions: { async create() { attempts += 1; const error = new Error('daily request limit per day'); error.status = 429; throw error; } } });
-    await assert.rejects(agent.extract('إزاي أزود مبيعات المحل؟', {}), { status: 429 });
+    await assert.rejects(agent.extract('اشتريت منتج جديد بمبلغ واضح', {}), { status: 429 });
     assert.equal(attempts, 1);
+    assert.equal(agent.deterministicFallback, undefined);
   } finally {
     agent.__setGeminiClientForTests(null);
     if (oldKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = oldKey;
-    if (oldModel === undefined) delete process.env.GEMINI_MODEL; else process.env.GEMINI_MODEL = oldModel;
   }
 });
 
@@ -95,8 +49,6 @@ test('business scope guard rejects role overrides and obvious unrelated requests
   assert.equal(agent.isOutOfDomain('إزاي أزود مبيعات المحل؟'), null);
   assert.equal(agent.isOutOfDomain('دفعت 300 جنيه كهربا'), null);
   assert.equal(agent.isOutOfDomain('عندي كام كرتونة مياه؟'), null);
-  const greeting = agent.deterministicFallback('السلام عليكم');
-  assert.equal(greeting.intent, 'question');
 });
 
 test('business tool registry validates operations and binds data access to server-selected project scope', () => {
@@ -127,8 +79,8 @@ test('browser voice is text-only at the agent boundary and voice failures preser
   const server = await fs.readFile(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   assert.match(client, /window\.SpeechRecognition \|\| window\.webkitSpeechRecognition/);
   assert.match(client, /instance\.lang = "ar-EG"/);
-  assert.match(client, /window\.speechSynthesis/);
-  assert.match(client, /speechAfterReply\(result\.reply, inputType === "voice"\)/);
+  assert.match(client, /appFetch\("\/api\/tts"/);
+  assert.match(client, /playReplyWithGemini\(result\.reply, true\)/);
   assert.match(client, /requestId: globalThis\.crypto\?\.randomUUID/);
   assert.doesNotMatch(client, /MediaRecorder|\/api\/voice\/transcribe|\/api\/voice\/synthesize/);
   assert.doesNotMatch(server, /createVoiceRouter|\/api\/voice/);

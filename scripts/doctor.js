@@ -32,7 +32,7 @@ check('Dependencies', ['express', 'dotenv', 'better-sqlite3'].every((name) => {
 }), 'run npm install if missing', true);
 check('Gemini SDK', (() => {
   try { require.resolve('@google/genai'); return true; } catch { return false; }
-})(), 'optional for text-only mode');
+})(), 'required for interpreting text and voice messages');
 
 const envExists = fs.existsSync(path.join(projectRoot, '.env'));
 check('Environment file', envExists, envExists ? '.env is present' : 'run npm run setup to create .env');
@@ -48,10 +48,10 @@ try {
 
 const configProblems = config.issues;
 check('Configuration values', configProblems.length === 0, configProblems.join(' '));
-check('Gemini API key', Boolean(config.geminiApiKey), 'text mode remains available without a key');
+check('Gemini API key', Boolean(config.geminiApiKey), 'stored data and reports remain readable without a key');
 
 async function main() {
-  check('Voice architecture', true, 'browser/system speech recognition and speech synthesis; microphone audio is not sent to Gemini');
+  check('Voice architecture', true, 'browser speech recognition and Gemini TTS; microphone audio is not sent to Gemini');
 
   if (process.argv.includes('--check-gemini')) {
     if (!config.geminiApiKey) {
@@ -73,7 +73,7 @@ async function main() {
     console.log('→ Use npm run doctor -- --check-gemini for an optional one-request connectivity check.');
   }
 
-  if (!config.geminiApiKey) console.log('→ Text mode is available. Add GEMINI_API_KEY to .env to enable Gemini features.');
+  if (!config.geminiApiKey) console.log('→ Stored records remain available. Add GEMINI_API_KEY to .env to interpret new messages.');
   if (requiredFailure) process.exitCode = 1;
 }
 

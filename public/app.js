@@ -25,9 +25,12 @@ const money = (n) =>
   `${new Intl.NumberFormat("ar-EG", { maximumFractionDigits: 2 }).format(Number(n) || 0)} جنيه`;
 function setReplyBusy(busy) {
   replyBusy = Boolean(busy);
-  $("#message-text").disabled = replyBusy;
-  $("#send-text").disabled = replyBusy;
-  $("#record-voice").disabled = replyBusy || voiceMode === "starting" || voiceMode === "processing" || !voiceAvailable;
+  $("#message-text").disabled = replyBusy || !state;
+  $("#send-text").disabled = replyBusy || !state;
+  $("#record-voice").disabled = !state || replyBusy || voiceMode === "starting" || voiceMode === "processing" || !voiceAvailable;
+  $("#project-select").disabled = replyBusy || !state;
+  $("#new-project").disabled = replyBusy;
+  $("#delete-project").disabled = replyBusy || !state;
 }
 async function appFetch(url, options) {
   try {
@@ -85,8 +88,25 @@ function renderConversation(messages) {
 }
 async function load() {
   const projects = (await api("/api/projects")).projects;
-  let id = Number(localStorage.getItem("faheemaProject") || localStorage.getItem("fahimProject") || 1);
-  if (!projects.some((p) => p.id === id)) id = projects[0]?.id || 1;
+  let id = Number(localStorage.getItem("faheemaProject") || localStorage.getItem("fahimProject"));
+  if (!projects.some((p) => p.id === id)) id = projects[0]?.id;
+  if (!id) {
+    state = null;
+    conversation = null;
+    localStorage.removeItem("faheemaProject");
+    $("#project-select").replaceChildren();
+    $("#messages").replaceChildren();
+    addMessage("ابدئي باختيار «مشروع جديد» واكتبي اسمه، وبعدها احكيلي عنه.");
+    for (const selector of ["#report", "#profile-toggle", "#memory-toggle"]) $(selector).disabled = true;
+    $("#profile-panel").hidden = true;
+    $("#memory-panel").hidden = true;
+    $("#report-panel").hidden = true;
+    lastReplyText = "";
+    playReplyButton.hidden = true;
+    setReplyBusy(false);
+    return;
+  }
+  for (const selector of ["#report", "#profile-toggle", "#memory-toggle"]) $(selector).disabled = false;
   localStorage.setItem("faheemaProject", id);
   $("#project-select").innerHTML = projects
     .map(
@@ -104,6 +124,7 @@ async function load() {
   renderFacts(state.facts);
   renderProfileStep();
   await voiceStatus();
+  setReplyBusy(false);
 }
 function renderFacts(facts) {
   $("#facts-list").innerHTML = facts?.length
@@ -113,7 +134,7 @@ function renderFacts(facts) {
             `<div class="fact-row"><div><strong>${escapeHtml(f.key)}</strong><span>${escapeHtml(f.value)}</span></div><button class="delete" data-fact-delete="${f.id}" aria-label="حذف المعلومة">×</button></div>`,
         )
         .join("")
-    : '<p class="note">لسه مفيش معلومات إضافية محفوظة. بيانات ملف المشروع تفضل منفصلة هنا.</p>';
+    : '<p class="note">لسه مفيش معلومات مؤكدة محفوظة عن المشروع.</p>';
   document.querySelectorAll("[data-fact-delete]").forEach(
     (b) =>
       (b.onclick = async () => {
@@ -125,9 +146,22 @@ function renderFacts(facts) {
       }),
   );
 }
+async function refreshProjectData() {
+  const projectId = state?.project?.id;
+  if (!projectId) return;
+  try {
+    const updated = await api(`/api/init?projectId=${projectId}&conversationId=${conversation.conversation.id}`);
+    if (state?.project?.id !== projectId) return;
+    state = updated;
+    renderFacts(state.facts);
+    renderProfileStep();
+  } catch (error) {
+    addMessage(error.message).classList.add("error");
+  }
+}
 async function sendMessage(text, inputType = "text") {
   const clean = String(text || "").trim();
-  if (!clean || replyBusy) return false;
+  if (!clean || replyBusy || !state || !conversation) return false;
   setReplyBusy(true);
   addMessage(clean, "user", inputType === "voice");
   const loading = addMessage("بفكر في كلامك…");
@@ -153,9 +187,10 @@ async function sendMessage(text, inputType = "text") {
       lastReplyText = result.reply;
       playReplyButton.hidden = false;
     }
-    if (result.kind === "report") await downloadReport(result.period.from, result.period.to);
-    if (result.reply) playReplyWithGemini(result.reply, true);
+    if (result.reply) void playReplyWithGemini(result.reply, true);
     else setReplyBusy(false);
+    if (result.kind === "report") void downloadReport(result.period.from, result.period.to);
+    if (result.kind === "saved") void refreshProjectData();
     return Boolean(result.reply);
   } catch (e) {
     loading.remove();
@@ -186,13 +221,13 @@ const profileSteps = [
   [
     "activity",
     "نوع النشاط",
-    "مثال: خياطة أو تجارة ملابس أو تربية دواجن",
+    "اكتبي نوع نشاط مشروعك",
     "text",
   ],
   [
     "products",
-    "إيه المنتجات أو الحيوانات اللي شغالة فيها؟",
-    "مثال: عبايات أو فراخ بلدي",
+    "إيه المنتجات أو الخدمات اللي بتقدميها؟",
+    "اكتبي المنتجات أو الخدمات",
     "text",
   ],
   [
@@ -201,18 +236,18 @@ const profileSteps = [
     "اكتبي المبلغ بالجنيه لو تعرفيه",
     "number",
   ],
-  ["costs", "إيه تكاليف الشراء أو الإنتاج؟", "مثال: قماش أو علف", "text"],
+  ["costs", "إيه تكاليف الشراء أو الإنتاج؟", "اكتبي تكاليف مشروعك", "text"],
   [
     "sales_method",
     "بتبيعي إزاي وإمتى؟",
-    "مثال: من البيت أو السوق يوم الجمعة",
+    "اكتبي طريقة ومواعيد البيع",
     "text",
   ],
   [
     "household_use",
     "بتستخدمي جزء من دخل المشروع للبيت؟",
-    "اختاري إجابة مناسبة ليكي",
-    "select",
+    "اكتبي إجابتك",
+    "text",
   ],
 ];
 function renderProfileStep() {
@@ -220,25 +255,19 @@ function renderProfileStep() {
   if (!step || !state) return;
   const value = state.project[step[0]];
   $("#profile-step").innerHTML =
-    `<p class="step-count">السؤال ${profileIndex + 1} من ${profileSteps.length}</p><label class="step-label">${step[1]}${step[3] === "select" ? `<select id="step-value"><option value="">اختاري</option><option value="yes">أيوه</option><option value="sometimes">أحيانًا</option><option value="no">لأ</option></select>` : `<input id="step-value" type="${step[3]}" ${step[3] === "number" ? 'min="0" step="0.01"' : ""} placeholder="${step[2]}">`}</label><div class="step-actions"><button id="step-save" class="primary">حفظ واللي بعده</button><button id="step-skip" class="quiet">تخطي</button><button id="step-back" class="quiet" ${profileIndex === 0 ? "disabled" : ""}>السابق</button></div>`;
-  if (value) $("#step-value").value = value;
+    `<p class="step-count">السؤال ${profileIndex + 1} من ${profileSteps.length}</p><label class="step-label">${step[1]}<input id="step-value" type="${step[3]}" ${step[3] === "number" ? 'min="0" step="0.01"' : ""} placeholder="${step[2]}"></label><div class="step-actions"><button id="step-save" class="primary">مراجعة في المحادثة</button><button id="step-skip" class="quiet">تخطي</button><button id="step-back" class="quiet" ${profileIndex === 0 ? "disabled" : ""}>السابق</button></div>`;
+  if (value != null) $("#step-value").value = value;
   $("#step-save").onclick = async () => {
     const raw = $("#step-value").value.trim();
     if (step[0] === "activity" && !raw) {
       addMessage("اكتبي نوع النشاط أو اختاري تخطي.").classList.add("error");
       return;
     }
-    const val =
-      step[0] === "capital" ? (raw ? Number(raw) : null) : raw || null;
-    try {
-      await api("/api/project", {
-        method: "PUT",
-        body: JSON.stringify({ id: state.project.id, [step[0]]: val }),
-      });
+    if (!raw) return;
+    const sent = await sendMessage(`عايزة أحفظ معلومة عن المشروع: ${step[1]}: ${raw}${step[0] === "capital" ? " جنيه" : ""}`);
+    if (sent) {
       profileIndex = Math.min(profileIndex + 1, profileSteps.length - 1);
-      await load();
-    } catch (e) {
-      addMessage(e.message).classList.add("error");
+      renderProfileStep();
     }
   };
   $("#step-skip").onclick = () => {
@@ -252,20 +281,8 @@ function renderProfileStep() {
 }
 $("#fact-form").onsubmit = async (e) => {
   e.preventDefault();
-  try {
-    await api("/api/project-facts", {
-      method: "POST",
-      body: JSON.stringify({
-        projectId: state.project.id,
-        key: $("#fact-key").value,
-        value: $("#fact-value").value,
-      }),
-    });
-    e.target.reset();
-    await load();
-  } catch (err) {
-    addMessage(err.message).classList.add("error");
-  }
+  const sent = await sendMessage(`عايزة أحفظ في ذاكرة المشروع: ${$("#fact-key").value}: ${$("#fact-value").value}`);
+  if (sent) e.target.reset();
 };
 $("#clear-facts").onclick = async () => {
   if (
@@ -334,14 +351,12 @@ const playReplyButton = $("#play-reply");
 const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let finalTranscript = "";
-let submittedTranscript = "";
-let submittedAt = 0;
 function setVoiceMode(mode, message) {
   voiceMode = mode;
   const labels = { ready: "🎤 اتكلمي", starting: "⏳ بجهز السماع…", recording: "⏹ إيقاف وإرسال", processing: "⏳ ثانية واحدة…" };
   recordButton.hidden = false;
   recordButton.textContent = labels[mode] || labels.ready;
-  recordButton.disabled = replyBusy || mode === "starting" || mode === "processing" || !voiceAvailable;
+  recordButton.disabled = !state || replyBusy || mode === "starting" || mode === "processing" || !voiceAvailable;
   recordButton.classList.toggle("recording", mode === "recording");
   recordButton.setAttribute("aria-pressed", String(mode === "recording"));
   $("#recording-status").textContent = message || ({ ready: voiceAvailable ? "اضغطي واتكلمي، واضغطي تاني لما تخلصي." : "الصوت مش متاح هنا، اكتبي رسالتك عادي.", starting: "بجهز الميكروفون…", recording: "سامعاكي… اضغطي لإيقاف الكلام وإرساله.", processing: "بحضّر الرد…" }[mode] || "");
@@ -356,11 +371,24 @@ function voiceStatus() {
 function createRecognition() {
   if (!SpeechRecognitionApi) return null;
   const instance = new SpeechRecognitionApi();
+  let submitted = false;
+  const submitTranscript = () => {
+    const text = finalTranscript.trim();
+    if (submitted || !text) return false;
+    submitted = true;
+    finalTranscript = "";
+    setVoiceMode("processing", "بحضّر الرد…");
+    void sendMessage(text, "voice").finally(() => {
+      setVoiceMode("ready", $("#recording-status").textContent);
+    });
+    return true;
+  };
   instance.lang = "ar-EG";
   instance.continuous = false;
   instance.interimResults = true;
   instance.onstart = () => setVoiceMode("recording", "سامعاكي… اضغطي لإيقاف الكلام وإرساله.");
   instance.onresult = (event) => {
+    if (submitted) return;
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const phrase = event.results[i][0]?.transcript || "";
@@ -368,28 +396,25 @@ function createRecognition() {
       else interim += phrase;
     }
     if (interim) $("#recording-status").textContent = `سامعاكي: ${interim}`;
+    // Final text is ready to send; browser shutdown can finish independently.
+    if (finalTranscript.trim() && !interim && submitTranscript()) {
+      try { instance.stop(); } catch { /* Recognition may already be ending. */ }
+    }
   };
   instance.onerror = (event) => {
+    if (submitted) return;
     const messages = { "not-allowed": "محتاجين تسمحي لِفهيمه تستخدم الميكروفون.", "service-not-allowed": "خدمة الصوت مش متاحة في المتصفح ده. اكتبي رسالتك عادي.", "no-speech": "مسمعتش حاجة، حاولي تاني." };
     speechFeedback = messages[event.error] || "الصوت وقف. تقدري تكتبي رسالتك عادي.";
     if (event.error !== "no-speech") addMessage(speechFeedback).classList.add("error");
   };
-  instance.onend = async () => {
-    const text = finalTranscript.trim();
-    finalTranscript = "";
-    if (!text) { setVoiceMode("ready", speechFeedback || "مسمعتش كلام واضح، حاولي تاني."); return; }
-    const now = Date.now();
-    if (text === submittedTranscript && now - submittedAt < 5000) { setVoiceMode("ready", "وصلت الرسالة قبل كده."); return; }
-    submittedTranscript = text;
-    submittedAt = now;
-    setVoiceMode("processing", "ثانية واحدة…");
-    const success = await sendMessage(text, "voice");
-    setVoiceMode("ready", success ? "خلصنا. تقدري تقولي رسالة جديدة." : "الرد النصي موجود. جربي تاني أو اكتبي رسالتك.");
+  instance.onend = () => {
+    if (submitted || submitTranscript()) return;
+    setVoiceMode("ready", speechFeedback || "مسمعتش كلام واضح، حاولي تاني.");
   };
   return instance;
 }
 recordButton.addEventListener("click", () => {
-  if (!voiceAvailable || voiceMode === "starting" || voiceMode === "processing") return;
+  if (!state || !voiceAvailable || voiceMode === "starting" || voiceMode === "processing") return;
   if (voiceMode === "recording") {
     setVoiceMode("processing", "ثانية واحدة…");
     recognition?.stop();

@@ -1,5 +1,5 @@
 const db = require('./db');
-const { TYPES, summary, validTransaction } = require('./finance');
+const { TYPES, summary, validDate, validTransaction } = require('./finance');
 
 function cairoParts(date = new Date()) {
   return Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date).map(part=>[part.type,part.value]));
@@ -14,14 +14,11 @@ function shiftCalendarDay(date, days) {
   return shifted.toISOString().slice(0,10);
 }
 function getProject(id) {
-  const numericId = Number(id || 1);
-  let project = db.prepare('SELECT * FROM projects WHERE id=?').get(numericId);
-  if (!project && numericId === 1) {
-    const result = db.prepare("INSERT INTO projects(name) VALUES ('مشروعي')").run();
-    project = db.prepare('SELECT * FROM projects WHERE id=?').get(result.lastInsertRowid);
-  }
-  return project || null;
+  const numericId = Number(id);
+  if (!Number.isSafeInteger(numericId) || numericId < 1) return null;
+  return db.prepare('SELECT * FROM projects WHERE id=?').get(numericId) || null;
 }
+
 function ensureConversation(projectId) {
   let row = db.prepare('SELECT * FROM conversations WHERE project_id=? ORDER BY updated_at DESC,id DESC LIMIT 1').get(projectId);
   if (!row) {
@@ -74,42 +71,38 @@ function findProduct(projectId, name, unit) {
   return db.prepare('SELECT * FROM products WHERE project_id=? AND name=? COLLATE NOCASE ORDER BY id DESC LIMIT 1').get(projectId,String(name).trim());
 }
 function recordTransaction(projectId, input) {
-  const x = { ...input, amount: Number(input.amount), description: String(input.description || '').trim().slice(0,180) };
-  let product = x.productName && x.quantity!=null ? findProduct(projectId,x.productName,x.unit) : null;
-  const qty = x.quantity == null ? null : Number(x.quantity);
-  let unitPrice = x.unitPrice == null ? null : Number(x.unitPrice);
-  // If the confirmed total and quantity are known, derive the per-unit amount locally.
-  if (unitPrice == null && Number.isFinite(qty) && qty > 0 && Number.isFinite(x.amount) && x.amount > 0) unitPrice = Math.round((x.amount / qty) * 100) / 100;
-  if (x.productName && x.quantity!=null && x.type === 'stock_cost' && !product) {
-    product = createProduct(projectId,{name:x.productName,unit:x.unit || 'وحدة',initialQuantity:0});
-  }
-  const itemized = Boolean(product && qty !== null && Number.isFinite(qty) && qty > 0 && unitPrice !== null && Number.isFinite(unitPrice) && unitPrice >= 0);
-  if (x.productName && x.quantity!=null && x.type === 'income' && !product) throw new Error('المنتج مش مضاف للمخزون. أضيفيه أولًا أو سجلي البيع من غير تحديث المخزون.');
-  if (x.productName && (!Number.isFinite(qty) || qty <= 0)) throw new Error('الكمية لازم تكون رقمًا أكبر من صفر.');
-  if (product && x.unit && String(x.unit).toLowerCase() !== String(product.unit).toLowerCase()) throw new Error(`وحدة ${product.name} المسجلة هي ${product.unit}. راجعي الوحدة قبل التسجيل.`);
-  if (itemized) x.amount = Math.round(qty * unitPrice * 100) / 100;
+  const x = { ...input, description: String(input.description || '').trim().slice(0,180) };
+  const qty = x.quantity == null ? null : x.quantity;
+  const hasDetails = qty !== null;
+  if (hasDetails && (typeof qty !== 'number' || !Number.isFinite(qty) || qty <= 0)) throw new Error('الكمية لازم تكون رقمًا أكبر من صفر.');
+  if (hasDetails && (!x.productName || !x.unit)) throw new Error('راجعي اسم المنتج ووحدة الكمية.');
+  if (hasDetails && !['income','stock_cost'].includes(x.type)) throw new Error('تفاصيل المخزون تخص البيع والشراء بس.');
   x.date = x.date || localDate();
   if (!validTransaction(x)) throw new Error('راجعي نوع العملية والمبلغ والتاريخ قبل التسجيل.');
+  const unitPrice = hasDetails ? (x.unitPrice == null ? x.amount / qty : x.unitPrice) : null;
+  if (hasDetails && (typeof unitPrice !== 'number' || !Number.isFinite(unitPrice) || unitPrice <= 0)) throw new Error('راجعي سعر الوحدة.');
+  if (hasDetails && Math.abs(Math.round(qty * unitPrice * 100) - Math.round(x.amount * 100)) > 1) throw new Error('الإجمالي مختلف عن الكمية في سعر الوحدة. راجعي المبلغ.');
+  // Keep the confirmed total; rounding an inferred unit price can change it.
+  if (x.productName && !x.description.includes(x.productName)) x.description = `${x.productName}: ${x.description}`.slice(0,180);
   const transact = db.transaction(() => {
-    let activeProduct = product;
-    if (itemized && x.productName && x.type === 'stock_cost' && !activeProduct) activeProduct = createProduct(projectId,{name:x.productName,unit:x.unit||'وحدة',initialQuantity:0});
-    if (itemized && activeProduct && x.type === 'income' && activeProduct.current_quantity < qty) throw new Error(`المخزون المسجل من ${activeProduct.name} هو ${activeProduct.current_quantity} ${activeProduct.unit}. قللي الكمية أو سجلي البيع من غير تحديث المخزون.`);
+    let product = hasDetails ? findProduct(projectId,x.productName,x.unit) : null;
+    if (hasDetails && !product && x.type === 'income') throw new Error('المنتج مش مضاف للمخزون. أضيفيه أولًا أو سجلي البيع من غير تحديث المخزون.');
+    if (hasDetails && !product) product = createProduct(projectId,{name:x.productName,unit:x.unit,initialQuantity:0});
+    if (product && x.type === 'income' && product.current_quantity < qty) throw new Error(`المخزون المسجل من ${product.name} هو ${product.current_quantity} ${product.unit}. قللي الكمية أو سجلي البيع من غير تحديث المخزون.`);
     const row = db.prepare('INSERT INTO transactions(project_id,type,amount,date,description,estimated) VALUES(?,?,?,?,?,?)').run(projectId,x.type,x.amount,x.date,x.description,x.estimated?1:0);
-    if (itemized && activeProduct) {
-      const total = Math.round(qty * unitPrice * 100) / 100;
-      db.prepare('INSERT INTO transaction_items(transaction_id,product_id,quantity,unit,unit_price,line_total) VALUES(?,?,?,?,?,?)').run(row.lastInsertRowid,activeProduct.id,qty,activeProduct.unit,unitPrice,total);
-      const isSale = x.type === 'income'; const delta = isSale ? -qty : qty;
-      if (isSale || x.type === 'stock_cost') {
-        db.prepare('INSERT INTO inventory_movements(project_id,product_id,type,quantity,delta,reference_type,reference_id,description) VALUES(?,?,?,?,?,?,?,?)').run(projectId,activeProduct.id,isSale?'sale':'purchase',qty,delta,'transaction',row.lastInsertRowid,x.description);
-        if (isSale) db.prepare('UPDATE products SET current_quantity=current_quantity-?,updated_at=datetime(\'now\') WHERE id=?').run(qty,activeProduct.id);
-        else {
-          const oldQty = activeProduct.current_quantity; const oldCost = activeProduct.unit_cost || 0;
-          const avgCost = oldQty + qty > 0 ? ((oldQty*oldCost)+(qty*unitPrice))/(oldQty+qty) : unitPrice;
-          db.prepare('UPDATE products SET current_quantity=current_quantity+?,unit_cost=?,updated_at=datetime(\'now\') WHERE id=?').run(qty,avgCost,activeProduct.id);
-        }
+    if (product) {
+      db.prepare('INSERT INTO transaction_items(transaction_id,product_id,quantity,unit,unit_price,line_total) VALUES(?,?,?,?,?,?)').run(row.lastInsertRowid,product.id,qty,product.unit,unitPrice,x.amount);
+      const isSale = x.type === 'income';
+      db.prepare('INSERT INTO inventory_movements(project_id,product_id,type,quantity,delta,reference_type,reference_id,description) VALUES(?,?,?,?,?,?,?,?)').run(projectId,product.id,isSale?'sale':'purchase',qty,isSale?-qty:qty,'transaction',row.lastInsertRowid,x.description);
+      if (isSale) db.prepare("UPDATE products SET current_quantity=current_quantity-?,updated_at=datetime('now') WHERE id=? AND project_id=?").run(qty,product.id,projectId);
+      else {
+        const oldQty = product.current_quantity;
+        // Unknown old costs remain unknown; do not silently value existing stock at zero.
+        const avgCost = oldQty > 0 && product.unit_cost == null ? null : ((oldQty*(product.unit_cost || 0))+x.amount)/(oldQty+qty);
+        db.prepare("UPDATE products SET current_quantity=current_quantity+?,unit_cost=?,updated_at=datetime('now') WHERE id=? AND project_id=?").run(qty,avgCost,product.id,projectId);
       }
     }
-    return db.prepare('SELECT * FROM transactions WHERE id=?').get(row.lastInsertRowid);
+    return db.prepare('SELECT * FROM transactions WHERE id=? AND project_id=?').get(row.lastInsertRowid,projectId);
   });
   return transact();
 }
@@ -135,7 +128,7 @@ function getProductSales(projectId, from, to) {
 }
 function addReminder(projectId, title, dueAt) {
   const cleanTitle=String(title||'').trim().slice(0,160); const date=String(dueAt||'');
-  if (!cleanTitle || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('راجعي عنوان التذكير وتاريخه.');
+  if (!cleanTitle || !validDate(date)) throw new Error('راجعي عنوان التذكير وتاريخه.');
   return db.prepare('INSERT INTO reminders(project_id,title,due_at) VALUES(?,?,?)').run(projectId,cleanTitle,date);
 }
 function getReminders(projectId) {

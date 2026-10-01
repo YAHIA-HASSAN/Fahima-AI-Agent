@@ -11,7 +11,7 @@ db.pragma('foreign_keys = ON');
 function migrate() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS projects (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT 'مشروعي', activity TEXT, products TEXT,
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, activity TEXT, products TEXT,
       capital REAL, costs TEXT, sales_method TEXT, household_use TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS transactions (

@@ -7,11 +7,9 @@ const Database = require('better-sqlite3');
 const F = require('../server/finance');
 const agent = require('../server/agent');
 
-test('normalizes Eastern Arabic digits and parses supported amounts', () => {
+test('normalizes Eastern Arabic digits', () => {
   assert.equal(F.normalizeDigits('١٢٣ ۱۲'), '123 12');
-  assert.equal(F.amountFromText('بعت بـ ٥٠٠ جنيه'), 500);
-  assert.equal(F.amountFromText('اشتريت بألفين'), 2000);
-  assert.equal(F.amountFromText('ألف ومتين'), null);
+
 });
 
 test('speaks numeric values in Arabic and replaces digits in prose', () => {
@@ -55,6 +53,21 @@ test('migrates legacy financial rows and records itemized stock movements', () =
     B.recordTransaction(1,{type:'income',amount:100,date:'2026-09-29',description:'بيع كرتونتين',productName:'مياه',quantity:2,unit:'كرتونة',unitPrice:50});
     assert.equal(B.getProducts(1)[0].current_quantity,8);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM transaction_items').get().n,1);
+    // A named purchase with only a total is a financial record, not a stock movement.
+    const movementsBefore=db.prepare('SELECT COUNT(*) n FROM inventory_movements').get().n;
+    for (const quantity of [null, undefined]) {
+      const purchase=B.recordTransaction(1,{type:'stock_cost',amount:500,date:'2026-09-29',description:'شراء قماش',productName:'قماش',quantity});
+      assert.equal(purchase.amount,500);
+      assert.equal(purchase.project_id,1);
+      assert.equal(purchase.type,'stock_cost');
+    }
+    assert.equal(B.findProduct(1,'قماش'),undefined);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM transaction_items').get().n,1);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM inventory_movements').get().n,movementsBefore);
+    for (const quantity of [0,-1,NaN,Infinity]) {
+      assert.throws(()=>B.recordTransaction(1,{type:'stock_cost',amount:500,date:'2026-09-29',description:'شراء قماش',productName:'قماش',quantity}),/الكمية/);
+    }
+    assert.equal(B.findProduct(1,'قماش'),undefined);
     db.close();
   } finally { fs.rmSync(dir,{recursive:true,force:true}); delete process.env.DB_PATH; }
 });
@@ -62,8 +75,7 @@ test('migrates legacy financial rows and records itemized stock movements', () =
 test('uses Gemini Flash structured output without sending database tools to the model', async () => {
   const oldKey=process.env.GEMINI_API_KEY,oldModel=process.env.GEMINI_MODEL;
   process.env.GEMINI_API_KEY='test-key';process.env.GEMINI_MODEL='gemini-test-flash';
-  agent.__setQuotaManagerForTests({ reserve:()=>1, finish:()=>{} });
-  const parsed={intent:'record_transaction',transaction_type:'income',amount:500,amount_kind:'total',date:'2026-09-29',period:'today',description:'بعت بـ 500',estimated:false,product_name:null,quantity:null,unit:null,unit_price:null,markup_percent:null,reminder_title:null,due_date:null,fact_key:null,fact_value:null,answer:''};
+  const parsed={intent:'record_transaction',transactions:[],transaction_type:'income',amount:500,amount_kind:'total',date:'2026-09-29',period:'today',description:'بعت بـ 500',estimated:false,product_name:null,quantity:null,unit:null,unit_price:null,markup_percent:null,reminder_title:null,due_date:null,fact_key:null,fact_value:null,answer:''};
   let captured;
   agent.__setGeminiClientForTests({interactions:{create:async(request)=>{captured=request;return {output_text:JSON.stringify(parsed)};}}});
   try {
