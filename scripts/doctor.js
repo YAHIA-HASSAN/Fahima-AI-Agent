@@ -51,7 +51,7 @@ check('Configuration values', configProblems.length === 0, configProblems.join('
 check('Gemini API key', Boolean(config.geminiApiKey), 'stored data and reports remain readable without a key');
 
 async function main() {
-  check('Voice architecture', true, 'browser speech recognition and Gemini TTS; microphone audio is not sent to Gemini');
+  check('Voice architecture', true, 'browser speech recognition; direct progressive Gemini MP3 playback');
 
   if (process.argv.includes('--check-gemini')) {
     if (!config.geminiApiKey) {

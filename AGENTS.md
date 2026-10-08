@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Faheema is a local-first Arabic business assistant built with Node.js, Express, SQLite, and browser speech APIs. The server is authoritative for project data, transactions, inventory, and reports. Gemini interprets ordinary in-scope user messages; it does not access the database directly.
+fahima is a local-first Arabic business assistant built with Node.js, Express, SQLite, and browser speech APIs. The server is authoritative for project data, transactions, inventory, and reports. Gemini interprets ordinary in-scope user messages; it does not access the database directly.
 
 ## Project structure
 
@@ -17,7 +17,7 @@ Faheema is a local-first Arabic business assistant built with Node.js, Express, 
 ## Implementation rules
 
 - Keep all database access and writes on the server. Scope every business operation to the selected project.
-- Treat Gemini output as untrusted structured input. Validate it and use only allowlisted operations; require explicit confirmation before committing transactions or project facts.
+- Treat Gemini output as untrusted structured input. Validate it and use only allowlisted operations. Clear user-stated project facts save automatically with provenance; hypotheses never overwrite actual facts. Require explicit confirmation before committing financial transactions or destructive changes.
 - Keep replies in short, everyday Egyptian Arabic for users with little reading or financial experience. Ask at most one clear question per turn, explain unavoidable terms plainly, and repeat important amounts for confirmation.
 - Extract every clearly stated sale, purchase, and expense in a multi-operation message. Keep each operation separate, ask for missing details one at a time, and commit the batch only after explicit confirmation.
 - Use Cairo calendar dates for business transactions and reporting.

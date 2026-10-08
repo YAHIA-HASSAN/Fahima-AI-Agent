@@ -18,10 +18,20 @@ function readNumber(env, name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGE
   return value;
 }
 
+const fs = require('node:fs');
+const path = require('node:path');
+
+function defaultDbPath(env = process.env) {
+  if (env.DB_PATH) return String(env.DB_PATH).trim();
+  const current = path.resolve('./data/fahima.sqlite');
+  const legacy = path.resolve('./data/fahim.sqlite');
+  return !fs.existsSync(current) && fs.existsSync(legacy) ? './data/fahim.sqlite' : './data/fahima.sqlite';
+}
+
 function loadConfig(env = process.env) {
   const issues = [];
   const geminiModel = String(env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim();
-  const dbPath = String(env.DB_PATH || './data/fahim.sqlite').trim();
+  const dbPath = defaultDbPath(env);
   if (!geminiModel) issues.push('GEMINI_MODEL cannot be empty.');
   if (!dbPath) issues.push('DB_PATH cannot be empty.');
 
@@ -30,10 +40,12 @@ function loadConfig(env = process.env) {
   return {
     issues,
     port,
-    dbPath: dbPath || './data/fahim.sqlite',
+    dbPath: dbPath || './data/fahima.sqlite',
     geminiApiKey: String(env.GEMINI_API_KEY || '').trim(),
     geminiModel: geminiModel || 'gemini-3.5-flash-lite',
     geminiTimeoutMs: readNumber(env, 'GEMINI_TIMEOUT_MS', 15000, { min: 1000, max: 300000, integer: true }, issues),
+    geminiTtsTimeoutMs: readNumber(env, 'GEMINI_TTS_TIMEOUT_MS', 8000, { min: 1000, max: 60000, integer: true }, issues),
+    geminiSearchTimeoutMs: readNumber(env, 'GEMINI_SEARCH_TIMEOUT_MS', 12000, { min: 1000, max: 60000, integer: true }, issues),
     agent: {
       recentMessageLimit: readNumber(env, 'AGENT_RECENT_MESSAGE_LIMIT', 8, { min: 2, max: 30, integer: true }, issues),
       contextTokenBudget: readNumber(env, 'AGENT_CONTEXT_TOKEN_BUDGET', 6000, { min: 512, max: 50000, integer: true }, issues),
@@ -41,4 +53,4 @@ function loadConfig(env = process.env) {
   };
 }
 
-module.exports = { loadConfig, readBoolean, readNumber };
+module.exports = { loadConfig, readBoolean, readNumber, defaultDbPath };

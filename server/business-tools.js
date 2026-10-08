@@ -12,6 +12,16 @@ function createBusinessTools(projectId, options = {}) {
   }
 
   return Object.freeze({
+    analyze_scenario: {
+      description: 'Calculate a proposal from this project facts or labelled assumptions; never write ledger records.',
+      execute: ({ calculation } = {}) => {
+        const { createMemory } = require('./memory');
+        const { calculate } = require('./planning');
+        const memory=createMemory(business.db);
+        const facts=[...memory.facts(scope),...memory.researchFacts(scope),...memory.goals(scope).map(goal=>({key:`goal:${goal.goal_key}`,label:goal.title,numeric_value:goal.target,certainty:'confirmed',source:'user',observed_on:null}))];
+        return calculate(calculation,{facts,message:options.message||'',cashRows:calculation.type==='cash'?business.getTransactions(scope,'0001-01-01',business.localDate()):[]});
+      },
+    },
     get_sales_summary: {
       description: 'Return authoritative sales total and count from the selected project records.',
       execute: ({ period = 'today' } = {}) => {

@@ -1,13 +1,13 @@
 {
-  "name": "faheema",
+  "name": "fahima",
   "version": "1.0.0",
   "private": true,
-  "description": "فهيمه: مساعدة أعمال بسيطة لصاحبات المشروعات الصغيرة",
+  "description": "فهيمة: مستشارة أعمال عربية للمشروعات الصغيرة",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node -e \"require('./test/finance.test'); require('./test/agent-architecture.test'); require('./test/reply-timing.test'); require('./test/data-flow.test')\"",
+    "test": "node -e \"process.env.NODE_ENV='test'; require('./test/finance.test'); require('./test/agent-architecture.test'); require('./test/reply-timing.test'); require('./test/data-flow.test'); require('./test/advisor.test')\"",
     "setup": "node scripts/setup.js",
     "doctor": "node scripts/doctor.js"
   },

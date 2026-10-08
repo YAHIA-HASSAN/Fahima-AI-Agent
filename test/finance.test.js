@@ -29,7 +29,7 @@ test('validates supported transactions without calculating profit', () => {
 });
 
 test('migrates legacy financial rows and records itemized stock movements', () => {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'faheema-test-'));
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fahima-test-'));
   process.env.DB_PATH=path.join(dir,'legacy.sqlite');
   const legacy=new Database(process.env.DB_PATH);
   legacy.exec(`CREATE TABLE projects(id INTEGER PRIMARY KEY,name TEXT NOT NULL,activity TEXT,products TEXT,capital REAL,costs TEXT,sales_method TEXT,household_use TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -40,7 +40,7 @@ test('migrates legacy financial rows and records itemized stock movements', () =
   try {
     const db=require('../server/db');
     const B=require('../server/business');
-    assert.equal(db.pragma('user_version',{simple:true}),2);
+    assert.equal(db.pragma('user_version',{simple:true}),5);
     assert.equal(B.getTransactions(1,'2026-09-01','2026-09-30').length,1);
     assert.equal(db.prepare('SELECT value FROM project_facts WHERE project_id=1 AND key=?').get('activity').value,'بقالة');
     const firstConversation=B.ensureConversation(1);
@@ -75,7 +75,7 @@ test('migrates legacy financial rows and records itemized stock movements', () =
 test('uses Gemini Flash structured output without sending database tools to the model', async () => {
   const oldKey=process.env.GEMINI_API_KEY,oldModel=process.env.GEMINI_MODEL;
   process.env.GEMINI_API_KEY='test-key';process.env.GEMINI_MODEL='gemini-test-flash';
-  const parsed={intent:'record_transaction',transactions:[],transaction_type:'income',amount:500,amount_kind:'total',date:'2026-09-29',period:'today',description:'بعت بـ 500',estimated:false,product_name:null,quantity:null,unit:null,unit_price:null,markup_percent:null,reminder_title:null,due_date:null,fact_key:null,fact_value:null,answer:''};
+  const parsed={transaction_status:'actual',intent:'record_transaction',transactions:[],transaction_type:'income',amount:500,amount_kind:'total',date:'2026-09-29',period:'today',description:'بعت بـ 500',estimated:false,product_name:null,quantity:null,unit:null,unit_price:null,markup_percent:null,reminder_title:null,due_date:null,fact_key:null,fact_value:null,answer:''};
   let captured;
   agent.__setGeminiClientForTests({interactions:{create:async(request)=>{captured=request;return {output_text:JSON.stringify(parsed)};}}});
   try {
@@ -83,6 +83,8 @@ test('uses Gemini Flash structured output without sending database tools to the 
     assert.equal(result.intent,'record_transaction');
     assert.equal(captured.model,'gemini-test-flash');
     assert.equal(captured.response_format[0].mime_type,'application/json');
+    assert.equal(JSON.stringify(captured.response_format[0].schema).includes('maxLength'),false);
+    assert.equal(JSON.stringify(captured.response_format[0].schema).includes('maxItems'),false);
     assert.match(captured.input,/صافي ربح/);
     assert.equal('tools' in captured,false);
   } finally {

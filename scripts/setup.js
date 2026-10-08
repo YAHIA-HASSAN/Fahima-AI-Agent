@@ -6,7 +6,7 @@ const envPath = path.join(projectRoot, '.env');
 const examplePath = path.join(projectRoot, '.env.example');
 
 if (Number(process.versions.node.split('.')[0]) < 20) {
-  console.error('Faheema requires Node.js 20 or later.');
+  console.error('fahima requires Node.js 20 or later.');
   process.exit(1);
 }
 

@@ -7,7 +7,6 @@ const TYPES = {
 const $ = (s) => document.querySelector(s);
 let state = null,
   conversation = null,
-  profileIndex = 0,
   speechFeedback = "",
   lastReplyText = "",
   voiceAvailable = false,
@@ -37,7 +36,7 @@ async function appFetch(url, options) {
     return await fetch(url, options);
   } catch (error) {
     if (error instanceof TypeError || /failed to fetch|networkerror/i.test(error?.message || "")) {
-      throw Error("الاتصال بفهيمه انقطع مؤقتًا. انتظري اكتمال تشغيله ثم أرسلي الرسالة مرة أخرى.");
+      throw Error("الاتصال بفهيمة انقطع مؤقتًا. انتظري اكتمال تشغيله ثم أرسلي الرسالة مرة أخرى.");
     }
     throw error;
   }
@@ -51,7 +50,7 @@ async function api(url, options = {}) {
   };
   const r = await appFetch(url, { ...options, headers });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw Error(data.error || "حصلت مشكلة. جربي تاني.");
+  if (!r.ok) throw Error(data.error || "حصلت مشكلة. جرب تاني.");
   return data;
 }
 function addMessage(text, who = "assistant", voice = false) {
@@ -67,11 +66,35 @@ function addMessage(text, who = "assistant", voice = false) {
   $("#messages").scrollTop = $("#messages").scrollHeight;
   return el;
 }
+function safeWebUrl(value) {
+  try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) ? url.href : ""; }
+  catch { return ""; }
+}
+function addResearchSources(results) {
+  const items = (results || []).flatMap(result => result.items || []).filter(item => item.source_url);
+  if (!items.length) return;
+  const box = document.createElement("div");
+  box.className = "bubble assistant research-sources";
+  const title = document.createElement("strong");
+  title.textContent = "مصادر بحث السوق";
+  box.append(title);
+  for (const item of items.slice(0, 6)) {
+    const url = safeWebUrl(item.source_url);
+    if (!url) continue;
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = item.source_title || item.seller || "فتح المصدر";
+    box.append(link);
+  }
+  if (box.childElementCount > 1) $("#messages").append(box);
+}
 function renderConversation(messages) {
   $("#messages").replaceChildren();
   if (!messages?.length)
     addMessage(
-      "أهلًا بيكي 🌿 احكيلي بصوتك عن مشروعك أو اسأليني عن حساباته. هسألك عن أي معلومة ناقصة، ومش هسجل حاجة غير لما تأكديها.",
+      "أهلًا، احكي لي عن مشروعك وإيه اللي عايز توصله. هنبني على المعلومات اللي تقولها، وأي بيع أو شراء هنراجعه قبل تسجيله.",
       "assistant",
     );
   else {
@@ -88,15 +111,15 @@ function renderConversation(messages) {
 }
 async function load() {
   const projects = (await api("/api/projects")).projects;
-  let id = Number(localStorage.getItem("faheemaProject") || localStorage.getItem("fahimProject"));
+  let id = Number(localStorage.getItem("fahimaProject") || localStorage.getItem("faheemaProject") || localStorage.getItem("fahimProject"));
   if (!projects.some((p) => p.id === id)) id = projects[0]?.id;
   if (!id) {
     state = null;
     conversation = null;
-    localStorage.removeItem("faheemaProject");
+    localStorage.removeItem("fahimaProject");
     $("#project-select").replaceChildren();
     $("#messages").replaceChildren();
-    addMessage("ابدئي باختيار «مشروع جديد» واكتبي اسمه، وبعدها احكيلي عنه.");
+    addMessage("ابدأ باختيار «مشروع جديد» واكتب اسمه، وبعدها احكي لي عنه.");
     for (const selector of ["#report", "#profile-toggle", "#memory-toggle"]) $(selector).disabled = true;
     $("#profile-panel").hidden = true;
     $("#memory-panel").hidden = true;
@@ -107,7 +130,8 @@ async function load() {
     return;
   }
   for (const selector of ["#report", "#profile-toggle", "#memory-toggle"]) $(selector).disabled = false;
-  localStorage.setItem("faheemaProject", id);
+  localStorage.setItem("fahimaProject", id);
+  localStorage.removeItem("faheemaProject");
   $("#project-select").innerHTML = projects
     .map(
       (p) =>
@@ -131,7 +155,7 @@ function renderFacts(facts) {
     ? facts
         .map(
           (f) =>
-            `<div class="fact-row"><div><strong>${escapeHtml(f.key)}</strong><span>${escapeHtml(f.value)}</span></div><button class="delete" data-fact-delete="${f.id}" aria-label="حذف المعلومة">×</button></div>`,
+            `<div class="fact-row"><div><strong>${escapeHtml(f.label || "معلومة عن المشروع")}</strong><span>${escapeHtml(f.value)}${f.certainty === "approximate" ? " · تقريبي" : ""}${f.observed_on ? " · " + escapeHtml(f.observed_on) : ""}</span></div><button class="delete" data-fact-delete="${f.id}" aria-label="حذف المعلومة">×</button></div>`,
         )
         .join("")
     : '<p class="note">لسه مفيش معلومات مؤكدة محفوظة عن المشروع.</p>';
@@ -159,12 +183,60 @@ async function refreshProjectData() {
     addMessage(error.message).classList.add("error");
   }
 }
+const followedResearchJobs=new Set();
+function followResearchJob(jobId, projectId) {
+  if(followedResearchJobs.has(jobId))return;
+  followedResearchJobs.add(jobId);
+  const progress=addMessage("براجع المصادر والأسعار…");
+  const events=new EventSource(`/api/research-jobs/${encodeURIComponent(jobId)}/events?projectId=${encodeURIComponent(projectId)}`);
+  let finished=false;
+  const finish=update=>{
+    if(finished||!['completed','failed'].includes(update.status))return;
+    finished=true;followedResearchJobs.delete(jobId);events.close();progress.remove();
+    if(update.status==='failed') {addMessage(update.error||"تعذر إكمال بحث السوق دلوقتي.").classList.add("error");return;}
+    const result=update.result||{};
+    if(result.reply)addMessage(result.reply);
+    addResearchSources(result.research);
+    if(result.reply){
+      lastReplyText=result.speechText||result.reply;
+      playReplyButton.hidden=false;
+      const speak=()=>void playReplyAudio(lastReplyText,true,result.speechStreamUrl);
+      if(generatedAudio&&!generatedAudio.paused)generatedAudio.addEventListener("ended",speak,{once:true});
+      else speak();
+    }
+    if(result.marketResearchChanged||result.plan||result.advisorState)void refreshProjectData();
+  };
+  events.onmessage=event=>{
+    let update;
+    try {update=JSON.parse(event.data);} catch {return;}
+    if(update.status==='queued'||update.status==='running')return;
+    finish(update);
+  };
+  events.onerror=async()=>{
+    if(finished)return;
+    progress.textContent="بستعيد اتصال متابعة البحث…";
+    try {
+      const update=await api(`/api/research-jobs/${encodeURIComponent(jobId)}?projectId=${encodeURIComponent(projectId)}`);
+      finish(update);
+    } catch(error) {
+      finished=true;followedResearchJobs.delete(jobId);events.close();
+      progress.textContent=error.message||"متابعة البحث اتوقفت. اطلب تحديث البحث علشان نبدأه من جديد.";
+      progress.classList.add("error");
+    }
+  };
+}
 async function sendMessage(text, inputType = "text") {
   const clean = String(text || "").trim();
   if (!clean || replyBusy || !state || !conversation) return false;
   setReplyBusy(true);
   addMessage(clean, "user", inputType === "voice");
-  const loading = addMessage("بفكر في كلامك…");
+  const loading = addMessage("بفهم طلبك…");
+  const loadingTimer=setInterval(()=>{
+    const elapsed=Number(loading.dataset.elapsed||0)+1;
+    loading.dataset.elapsed=String(elapsed);
+    loading.textContent=elapsed<4?"براجع معلومات المشروع…":"بجهز الرد…";
+  },1500);
+  const stopLoading=()=>clearInterval(loadingTimer);
   try {
     const result = await api("/api/chat", {
       method: "POST",
@@ -176,24 +248,34 @@ async function sendMessage(text, inputType = "text") {
         requestId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       }),
     });
-    loading.remove();
+    stopLoading();loading.remove();
+    setReplyBusy(false);
     if (result.error) {
       addMessage(result.error).classList.add("error");
       setReplyBusy(false);
       return false;
     }
+    if (result.kind === "switch_project") {
+      localStorage.setItem("fahimaProject", result.projectId);
+      setReplyBusy(false);
+      await load();
+      addMessage(result.reply);
+      return true;
+    }
     if (result.reply) {
       addMessage(result.reply);
-      lastReplyText = result.reply;
+      if (typeof addResearchSources === "function") addResearchSources(result.research);
+      lastReplyText = result.speechText || result.reply;
       playReplyButton.hidden = false;
     }
-    if (result.reply) void playReplyWithGemini(result.reply, true);
-    else setReplyBusy(false);
+    if (result.reply) void playReplyAudio(lastReplyText, true, result.speechStreamUrl);
+    if (result.researchJobId) followResearchJob(result.researchJobId, state.project.id);
     if (result.kind === "report") void downloadReport(result.period.from, result.period.to);
-    if (result.kind === "saved") void refreshProjectData();
+    if (result.plan) $("#profile-panel").hidden = false;
+    if (result.kind === "saved" || result.factsChanged || result.plan || result.advisorState || result.marketResearchChanged) void refreshProjectData();
     return Boolean(result.reply);
   } catch (e) {
-    loading.remove();
+    stopLoading();loading.remove();
     addMessage(e.message).classList.add("error");
     setReplyBusy(false);
     return false;
@@ -217,77 +299,51 @@ $("#profile-toggle").onclick = () =>
   ($("#profile-panel").hidden = !$("#profile-panel").hidden);
 $("#memory-toggle").onclick = () =>
   ($("#memory-panel").hidden = !$("#memory-panel").hidden);
-const profileSteps = [
-  [
-    "activity",
-    "نوع النشاط",
-    "اكتبي نوع نشاط مشروعك",
-    "text",
-  ],
-  [
-    "products",
-    "إيه المنتجات أو الخدمات اللي بتقدميها؟",
-    "اكتبي المنتجات أو الخدمات",
-    "text",
-  ],
-  [
-    "capital",
-    "عارفة المبلغ المتاح للمشروع؟ (اختياري)",
-    "اكتبي المبلغ بالجنيه لو تعرفيه",
-    "number",
-  ],
-  ["costs", "إيه تكاليف الشراء أو الإنتاج؟", "اكتبي تكاليف مشروعك", "text"],
-  [
-    "sales_method",
-    "بتبيعي إزاي وإمتى؟",
-    "اكتبي طريقة ومواعيد البيع",
-    "text",
-  ],
-  [
-    "household_use",
-    "بتستخدمي جزء من دخل المشروع للبيت؟",
-    "اكتبي إجابتك",
-    "text",
-  ],
-];
 function renderProfileStep() {
-  const step = profileSteps[profileIndex];
-  if (!step || !state) return;
-  const value = state.project[step[0]];
-  $("#profile-step").innerHTML =
-    `<p class="step-count">السؤال ${profileIndex + 1} من ${profileSteps.length}</p><label class="step-label">${step[1]}<input id="step-value" type="${step[3]}" ${step[3] === "number" ? 'min="0" step="0.01"' : ""} placeholder="${step[2]}"></label><div class="step-actions"><button id="step-save" class="primary">مراجعة في المحادثة</button><button id="step-skip" class="quiet">تخطي</button><button id="step-back" class="quiet" ${profileIndex === 0 ? "disabled" : ""}>السابق</button></div>`;
-  if (value != null) $("#step-value").value = value;
-  $("#step-save").onclick = async () => {
-    const raw = $("#step-value").value.trim();
-    if (step[0] === "activity" && !raw) {
-      addMessage("اكتبي نوع النشاط أو اختاري تخطي.").classList.add("error");
-      return;
+  if (!state) return;
+  const data = state.advisor || {};
+  const current = data.state || {};
+  const plan = data.plan;
+  const list = rows => rows?.length ? '<ul>' + rows.map(text => '<li>' + escapeHtml(text) + '</li>').join('') + '</ul>' : '';
+  let html = '<h3>' + escapeHtml(current.objective || 'الخطوة الجاية لمشروعك') + '</h3>';
+  if (current.next_action) html += '<p>' + escapeHtml(current.next_action) + '</p>';
+  if (data.goals?.length) html += '<h3>الأهداف</h3>' + list(data.goals.map(goal => goal.title + (goal.horizon ? ' · ' + goal.horizon : '')));
+  if (plan) {
+    html += '<details open><summary>' + escapeHtml(plan.title) + ' · نسخة ' + plan.revision + '</summary>';
+    if (plan.stale) html += '<p class="note">في معلومات اتغيرت. الخطة دي محتاجة مراجعة قبل الاعتماد عليها.</p>';
+    html += '<p>' + escapeHtml(plan.body.summary) + '</p>';
+    for (const [key,label] of [['requirements','اللي محتاجينه'],['assumptions','افتراضات محتاجة مراجعة'],['risks','حاجات ناخد بالنا منها'],['indicators','هنعرف التقدم إزاي']]) {
+      if (plan.body[key]?.length) html += '<h4>' + label + '</h4>' + list(plan.body[key]);
     }
-    if (!raw) return;
-    const sent = await sendMessage(`عايزة أحفظ معلومة عن المشروع: ${step[1]}: ${raw}${step[0] === "capital" ? " جنيه" : ""}`);
-    if (sent) {
-      profileIndex = Math.min(profileIndex + 1, profileSteps.length - 1);
-      renderProfileStep();
-    }
-  };
-  $("#step-skip").onclick = () => {
-    profileIndex = Math.min(profileIndex + 1, profileSteps.length - 1);
-    renderProfileStep();
-  };
-  $("#step-back").onclick = () => {
-    profileIndex = Math.max(0, profileIndex - 1);
-    renderProfileStep();
-  };
+    html += '<h4>خطوات التنفيذ</h4>' + list(plan.body.steps.map(step => step.text + (step.status === 'completed' ? ' · تمت' : step.status === 'in_progress' ? ' · شغالين عليها' : ' · مقترحة')));
+    if (plan.body.calculations?.length) html += '<h4>الحسابات</h4>' + list(plan.body.calculations.map(row => row.display || '').filter(Boolean));
+    html += '</details>';
+  }
+  const research = data.knowledge?.research || [];
+  if (research.length) {
+    html += '<details><summary>بحث السوق والمصادر</summary>';
+    html += research.slice(0, 12).map(row => {
+      const url = safeWebUrl(row.source_url);
+      const price = row.price == null ? 'من غير سعر واضح' : money(row.price) + (row.quantity && row.unit ? ' لكل ' + escapeHtml(row.quantity) + ' ' + escapeHtml(row.unit) : '');
+      const delivery = row.delivery_cost == null ? '' : ' · توصيل ' + money(row.delivery_cost);
+      const freshness = row.stale ? ' · محتاج تحديث' : ' · اتراجع ' + escapeHtml((row.retrieved_at || '').slice(0, 10));
+      return '<p><strong>' + escapeHtml(row.product_name || row.research_key) + '</strong>' + (row.specification ? '<br>' + escapeHtml(row.specification) : '') + '<br>' + price + delivery + freshness + (url ? '<br><a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(row.source_title || 'فتح المصدر') + '</a>' : '') + '</p>';
+    }).join('');
+    html += '</details>';
+  }
+  html += '<button id="advisor-continue" class="primary">نكمل الخطوة الجاية</button>';
+  $("#profile-step").innerHTML = html;
+  $("#advisor-continue").onclick = () => sendMessage('كمل معايا الخطوة الجاية للمشروع');
 }
 $("#fact-form").onsubmit = async (e) => {
   e.preventDefault();
-  const sent = await sendMessage(`عايزة أحفظ في ذاكرة المشروع: ${$("#fact-key").value}: ${$("#fact-value").value}`);
+  const sent = await sendMessage(`معلومة عن المشروع: ${$("#fact-key").value}: ${$("#fact-value").value}`);
   if (sent) e.target.reset();
 };
 $("#clear-facts").onclick = async () => {
   if (
     !confirm(
-      "هتمسحي المعلومات المؤكدة من ذاكرة المشروع. المعاملات هتفضل زي ما هي. تكملي؟",
+      "هيتم مسح المعلومات المؤكدة من ذاكرة المشروع. المعاملات هتفضل زي ما هي. تكملي؟",
     )
   )
     return;
@@ -299,7 +355,7 @@ $("#clear-facts").onclick = async () => {
 $("#clear-conversation").onclick = async () => {
   if (
     !confirm(
-      "هتمسحي رسائل المحادثة والطلب المعلق فقط. المعاملات وذاكرة المشروع هيفضلوا. تكملي؟",
+      "هيتم مسح رسائل المحادثة والطلب المعلق فقط. المعاملات وذاكرة المشروع هيفضلوا. تكملي؟",
     )
   )
     return;
@@ -310,33 +366,32 @@ $("#clear-conversation").onclick = async () => {
   await load();
 };
 $("#project-select").onchange = () => {
-  localStorage.setItem("faheemaProject", $("#project-select").value);
-  profileIndex = 0;
+  localStorage.setItem("fahimaProject", $("#project-select").value);
   load();
 };
 $("#new-project").onclick = async () => {
-  const name = prompt("اكتبي اسم بسيط للمشروع:");
+  const name = prompt("اكتب اسم بسيط للمشروع:");
   if (!name?.trim()) return;
   try {
     const r = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({ name }),
     });
-    localStorage.setItem("faheemaProject", r.project.id);
+    localStorage.setItem("fahimaProject", r.project.id);
     $("#profile-panel").hidden = false;
-    profileIndex = 0;
-    await load();
+      await load();
   } catch (e) {
     addMessage(e.message).classList.add("error");
   }
 };
 $("#delete-project").onclick = async () => {
   const name = state?.project?.name || "المشروع الحالي";
-  if (!confirm(`هتحذفي «${name}» وكل بياناته ومحادثاته ومخزونه نهائيًا. لا يمكن التراجع. متأكدة؟`)) return;
+  if (!confirm(`هيتم حذف «${name}» وكل بياناته ومحادثاته ومخزونه نهائيًا. لا يمكن التراجع. متأكدة؟`)) return;
   const button = $("#delete-project");
   button.disabled = true;
   try {
     await api(`/api/projects/${state.project.id}`, { method: "DELETE" });
+    localStorage.removeItem("fahimaProject");
     localStorage.removeItem("faheemaProject");
     localStorage.removeItem("fahimProject");
     await load();
@@ -353,17 +408,17 @@ let recognition = null;
 let finalTranscript = "";
 function setVoiceMode(mode, message) {
   voiceMode = mode;
-  const labels = { ready: "🎤 اتكلمي", starting: "⏳ بجهز السماع…", recording: "⏹ إيقاف وإرسال", processing: "⏳ ثانية واحدة…" };
+  const labels = { ready: "🎤 ابدأ الكلام", starting: "⏳ بجهز السماع…", recording: "⏹ إيقاف وإرسال", processing: "⏳ ثانية واحدة…" };
   recordButton.hidden = false;
   recordButton.textContent = labels[mode] || labels.ready;
   recordButton.disabled = !state || replyBusy || mode === "starting" || mode === "processing" || !voiceAvailable;
   recordButton.classList.toggle("recording", mode === "recording");
   recordButton.setAttribute("aria-pressed", String(mode === "recording"));
-  $("#recording-status").textContent = message || ({ ready: voiceAvailable ? "اضغطي واتكلمي، واضغطي تاني لما تخلصي." : "الصوت مش متاح هنا، اكتبي رسالتك عادي.", starting: "بجهز الميكروفون…", recording: "سامعاكي… اضغطي لإيقاف الكلام وإرساله.", processing: "بحضّر الرد…" }[mode] || "");
+  $("#recording-status").textContent = message || ({ ready: voiceAvailable ? "اضغط وابدأ الكلام، واضغط تاني لما تخلصي." : "الصوت مش متاح هنا، اكتب رسالتك عادي.", starting: "بجهز الميكروفون…", recording: "سامعاك… اضغط لإيقاف الكلام وإرساله.", processing: "بحضّر الرد…" }[mode] || "");
 }
 function voiceStatus() {
   voiceAvailable = Boolean(SpeechRecognitionApi);
-  $("#voice-status").textContent = voiceAvailable ? "الإملاء من المتصفح · صوت الرد من Gemini" : "الإملاء غير متاح · صوت الرد من Gemini";
+  $("#voice-status").textContent = voiceAvailable ? "الإملاء من المتصفح · صوت Gemini مباشر" : "الإملاء غير متاح · صوت Gemini مباشر";
   $("#voice-status").classList.toggle("voice-offline", !voiceAvailable);
   playReplyButton.hidden = !lastReplyText;
   setVoiceMode("ready");
@@ -386,7 +441,7 @@ function createRecognition() {
   instance.lang = "ar-EG";
   instance.continuous = false;
   instance.interimResults = true;
-  instance.onstart = () => setVoiceMode("recording", "سامعاكي… اضغطي لإيقاف الكلام وإرساله.");
+  instance.onstart = () => setVoiceMode("recording", "سامعاك… اضغط لإيقاف الكلام وإرساله.");
   instance.onresult = (event) => {
     if (submitted) return;
     let interim = "";
@@ -395,7 +450,7 @@ function createRecognition() {
       if (event.results[i].isFinal) finalTranscript += phrase + " ";
       else interim += phrase;
     }
-    if (interim) $("#recording-status").textContent = `سامعاكي: ${interim}`;
+    if (interim) $("#recording-status").textContent = `سامعاك: ${interim}`;
     // Final text is ready to send; browser shutdown can finish independently.
     if (finalTranscript.trim() && !interim && submitTranscript()) {
       try { instance.stop(); } catch { /* Recognition may already be ending. */ }
@@ -403,8 +458,8 @@ function createRecognition() {
   };
   instance.onerror = (event) => {
     if (submitted) return;
-    const messages = { "not-allowed": "محتاجين تسمحي لِفهيمه تستخدم الميكروفون.", "service-not-allowed": "خدمة الصوت مش متاحة في المتصفح ده. اكتبي رسالتك عادي.", "no-speech": "مسمعتش حاجة، حاولي تاني." };
-    speechFeedback = messages[event.error] || "الصوت وقف. تقدري تكتبي رسالتك عادي.";
+    const messages = { "not-allowed": "محتاجين السماح لِفهيمة تستخدم الميكروفون.", "service-not-allowed": "خدمة الصوت مش متاحة في المتصفح ده. اكتب رسالتك عادي.", "no-speech": "مسمعتش حاجة، حاولي تاني." };
+    speechFeedback = messages[event.error] || "الصوت وقف. تقدر تكتبي رسالتك عادي.";
     if (event.error !== "no-speech") addMessage(speechFeedback).classList.add("error");
   };
   instance.onend = () => {
@@ -425,64 +480,70 @@ recordButton.addEventListener("click", () => {
   recognition = createRecognition();
   setVoiceMode("starting");
   try { recognition.start(); }
-  catch { setVoiceMode("ready", "مش قادرة أفتح الميكروفون دلوقتي. جربي تاني أو اكتبي."); }
+  catch { setVoiceMode("ready", "مش قادرة أفتح الميكروفون دلوقتي. جرب تاني أو اكتب."); }
 });
 playReplyButton.addEventListener("click", () => {
   if (generatedAudio && generatedAudioUrl && generatedAudioText === lastReplyText) {
-    setReplyBusy(true);
-    generatedAudio.play().catch(() => { $("#recording-status").textContent = "الصوت جاهز. اضغطي الزر مرة تانية للتشغيل."; setReplyBusy(false); });
+    generatedAudio.play().catch(() => { $("#recording-status").textContent = "الصوت جاهز. اضغط الزر مرة تانية للتشغيل."; });
     return;
   }
-  playReplyWithGemini(lastReplyText, true);
+  playReplyAudio(lastReplyText, true);
 });
 let generatedAudio = null;
 let generatedAudioUrl = "";
 let generatedAudioText = "";
-async function playReplyWithGemini(text, autoPlay = false) {
+let audioRequest = 0;
+function playReplyAudio(text,autoPlay=false,streamUrl=null) {
+  const clean=String(text||"").trim();
+  if(!clean)return Promise.resolve();
+  return playReplyWithGemini(clean,autoPlay,streamUrl);
+}
+async function playReplyWithGemini(text, autoPlay = false, streamUrl = null) {
   const clean = String(text || "").trim();
-  if (!clean) { setReplyBusy(false); return; }
+  if (!clean) return;
+  const request=++audioRequest;
   if (generatedAudio) generatedAudio.pause();
-  setReplyBusy(true);
   playReplyButton.disabled = true;
   playReplyButton.textContent = "⏳ بجهز الصوت…";
-  $("#recording-status").textContent = "بجهز قراءة الرد بصوت عربي…";
+  $("#recording-status").textContent = "الصوت هيبدأ أول ما توصل أول دفعة…";
   try {
-    const response = await appFetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: clean }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw Error(error.error || "تعذر تجهيز الصوت.");
+    let resolvedStreamUrl=streamUrl;
+    if(!resolvedStreamUrl){
+      const response = await appFetch("/api/tts/ticket", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: clean }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw Error(error.error || "تعذر تجهيز الصوت.");
+      }
+      const ticket=await response.json();
+      resolvedStreamUrl=ticket.streamUrl;
     }
-    const audioBlob = await response.blob();
+    if(request!==audioRequest)return;
     if (generatedAudio) generatedAudio.pause();
-    if (generatedAudioUrl) URL.revokeObjectURL(generatedAudioUrl);
-    generatedAudioUrl = URL.createObjectURL(audioBlob);
+    generatedAudioUrl = resolvedStreamUrl;
     generatedAudio = new Audio(generatedAudioUrl);
+    generatedAudio.preload = "auto";
     generatedAudioText = clean;
-    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي. تقدري تسمعيه تاني من الزر."; playReplyButton.textContent = "🔁 اسمعي الرد تاني"; setReplyBusy(false); };
-    generatedAudio.onerror = () => { $("#recording-status").textContent = "تعذر تشغيل الصوت."; setReplyBusy(false); };
+    generatedAudio.onplaying = () => { $("#recording-status").textContent = "فهيمة بتقرأ الرد بصوت عربي."; playReplyButton.textContent = "🔁 اسمع الرد تاني"; };
+    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي. تقدر تسمعه تاني من الزر."; playReplyButton.textContent = "🔁 اسمع الرد تاني"; };
+    generatedAudio.onerror = () => { $("#recording-status").textContent = "تعذر تشغيل الصوت دلوقتي. الرد المكتوب جاهز."; playReplyButton.textContent = "🔊 اسمع الرد"; playReplyButton.disabled=false; };
     if (autoPlay) {
       try {
         await generatedAudio.play();
-        $("#recording-status").textContent = "فهيمه بتقرأ الرد بصوت عربي.";
-        playReplyButton.textContent = "🔁 اسمعي الرد تاني";
       } catch {
         playReplyButton.textContent = "▶️ شغلي الرد";
-        $("#recording-status").textContent = "المتصفح منع التشغيل التلقائي. الصوت جاهز؛ اضغطي الزر للتشغيل.";
-        setReplyBusy(false);
+        $("#recording-status").textContent = "المتصفح منع التشغيل التلقائي. الصوت جاهز؛ اضغط الزر للتشغيل.";
       }
     } else {
       $("#recording-status").textContent = "الصوت جاهز.";
     }
   } catch (error) {
-    $("#recording-status").textContent = error.message || "تعذر تجهيز صوت Gemini. الرد النصي موجود، وجربي زر إعادة السماع.";
-    setReplyBusy(false);
+    $("#recording-status").textContent = error.message || "تعذر تجهيز صوت Gemini. الرد النصي موجود، وجرب زر إعادة السماع.";
   } finally {
-    playReplyButton.disabled = false;
-    if (!(generatedAudio && generatedAudioUrl && generatedAudioText === lastReplyText && generatedAudio.paused)) playReplyButton.textContent = "🔊 اسمعي الرد";
+    if(request===audioRequest)playReplyButton.disabled = false;
   }
 }
 voiceStatus();
@@ -534,7 +595,7 @@ function reportCanvas(report, rows, pageNumber, totalPages, isFirst) {
   ctx.fillRect(0, 0, canvas.width, 220);
   drawRtl(
     ctx,
-    "فهيمه · تقرير المشروع",
+    "فهيمة · تقرير المشروع",
     1140,
     48,
     1040,
@@ -686,7 +747,7 @@ function reportCanvas(report, rows, pageNumber, totalPages, isFirst) {
   });
   drawRtl(
     ctx,
-    `فهيمه · صفحة ${pageNumber} من ${totalPages}`,
+    `فهيمة · صفحة ${pageNumber} من ${totalPages}`,
     1140,
     1685,
     1050,
@@ -728,7 +789,7 @@ async function createReportPdf(report) {
     byteLength += part.length;
   };
   const ascii = (s) => encoder.encode(s);
-  append(ascii("%PDF-1.4\n% Faheema PDF\n"));
+  append(ascii("%PDF-1.4\n% fahima PDF\n"));
   const offsets = [];
   const addObject = (id, content) => {
     offsets[id] = byteLength;
@@ -786,7 +847,7 @@ async function downloadReport(from = state.period.from, to = state.period.to) {
     );
     const blob = await createReportPdf(report);
     const url = URL.createObjectURL(blob);
-    const name = `Faheema-report-${report.period.from}-${report.period.to}.pdf`;
+    const name = `fahima-report-${report.period.from}-${report.period.to}.pdf`;
     const a = document.createElement("a");
     a.href = url;
     a.download = name;

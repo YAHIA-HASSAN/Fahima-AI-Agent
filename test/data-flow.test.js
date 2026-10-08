@@ -7,7 +7,7 @@ const { randomUUID } = require('node:crypto');
 const agent = require('../server/agent');
 
 function interpreted(fields = {}) {
-  return { intent: 'question', transactions: [], transaction_type: null, amount: null,
+  return { transaction_status:'actual', intent: 'question', transactions: [], transaction_type: null, amount: null,
     amount_kind: null, date: '', period: 'today', description: '', estimated: false,
     product_name: null, quantity: null, unit: null, unit_price: null, markup_percent: null,
     reminder_title: null, due_date: null, fact_key: null, fact_value: null, answer: '', ...fields };
@@ -25,7 +25,7 @@ test('validates untrusted LLM structure and rejects invented fields and invalid 
 });
 
 test('HTTP business data comes from confirmed LLM fields and scoped SQLite records', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faheema-data-flow-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fahima-data-flow-'));
   const oldPath = process.env.DB_PATH;
   const oldKey = process.env.GEMINI_API_KEY;
   process.env.DB_PATH = path.join(dir, 'test.sqlite');
@@ -134,13 +134,11 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       assert.equal(result.body.pending.payload.waiting_for, 'quantity');
     });
 
-    await t.test('facts update database profile only after confirmation and clear together', async () => {
+    await t.test('clear facts save automatically and profile clears with them', async () => {
       await freshConversation();
       const activity = randomUUID();
-      const result = await chat({ intent: 'project_fact', fact_key: 'activity', fact_value: activity });
-      assert.equal(result.body.kind, 'confirm_fact');
-      assert.equal(B.getProject(projectId).activity, null);
-      await confirm();
+      const result = await chat({ intent: 'project_fact', fact_key: 'activity', fact_value: activity }, `نشاطي ${activity}`);
+      assert.equal(result.body.kind, 'advice');
       assert.equal(B.getProject(projectId).activity, activity);
       const fact = db.prepare('SELECT * FROM project_facts WHERE project_id=?').get(projectId);
       assert.equal(fact.value, activity);

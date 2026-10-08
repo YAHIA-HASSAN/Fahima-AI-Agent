@@ -1,8 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const { defaultDbPath } = require('./config');
 
-const dbPath = path.resolve(process.env.DB_PATH || './data/fahim.sqlite');
+const dbPath = path.resolve(defaultDbPath(process.env));
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
@@ -119,6 +120,118 @@ function migrate() {
       `);
     });
     upgrade();
+  }
+  if (db.pragma('user_version', { simple: true }) < 3) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE project_facts ADD COLUMN label TEXT NOT NULL DEFAULT '';
+        ALTER TABLE project_facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact';
+        ALTER TABLE project_facts ADD COLUMN certainty TEXT NOT NULL DEFAULT 'confirmed';
+        ALTER TABLE project_facts ADD COLUMN numeric_value REAL;
+        ALTER TABLE project_facts ADD COLUMN unit TEXT;
+        ALTER TABLE project_facts ADD COLUMN observed_on TEXT;
+        ALTER TABLE project_facts ADD COLUMN source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL;
+        ALTER TABLE project_facts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+        CREATE TABLE fact_history (
+          id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          fact_key TEXT NOT NULL, snapshot TEXT NOT NULL, source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE business_goals (
+          id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          goal_key TEXT NOT NULL, title TEXT NOT NULL, target REAL, unit TEXT, horizon TEXT,
+          status TEXT NOT NULL DEFAULT 'active', source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(project_id,goal_key)
+        );
+        CREATE TABLE advisor_state (
+          project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          objective TEXT NOT NULL DEFAULT '', capability TEXT NOT NULL DEFAULT '', next_action TEXT NOT NULL DEFAULT '',
+          pending_question TEXT, progress TEXT NOT NULL DEFAULT '[]',
+          source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE business_plans (
+          id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft', stale INTEGER NOT NULL DEFAULT 0,
+          source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(project_id,revision)
+        );
+        CREATE INDEX plans_project_idx ON business_plans(project_id,revision DESC);
+        ALTER TABLE chat_requests ADD COLUMN request_hash TEXT;
+      `);
+      // Backfill only facts already supplied by the user. Keep all legacy rows.
+      for (const project of db.prepare('SELECT * FROM projects').all()) {
+        for (const key of ['activity','products','capital','costs','sales_method','household_use']) {
+          const value = project[key];
+          if (value == null || String(value).trim() === '') continue;
+          if (!db.prepare('SELECT 1 FROM project_facts WHERE project_id=? AND key=?').get(project.id,key)) {
+            db.prepare("INSERT INTO project_facts(project_id,key,value,source) VALUES(?,?,?,'profile')").run(project.id,key,String(value));
+          }
+        }
+      }
+      for (const row of db.prepare("SELECT id,value FROM project_facts WHERE key IN ('capital','starting_capital','available_cash','total_invested','obligations')").all()) {
+        const value = Number(row.value);
+        if (row.value.trim() && Number.isFinite(value)) db.prepare("UPDATE project_facts SET numeric_value=?,unit='جنيه' WHERE id=?").run(value,row.id);
+      }
+      db.pragma('user_version = 3');
+    })();
+  }
+  if (db.pragma('user_version', { simple: true }) < 4) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE market_research (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          research_key TEXT NOT NULL,
+          query TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          product_name TEXT NOT NULL DEFAULT '',
+          specification TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          price REAL,
+          currency TEXT,
+          quantity REAL,
+          unit TEXT,
+          normalized_price REAL,
+          normalized_unit TEXT,
+          seller TEXT,
+          source_title TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
+          source_kind TEXT NOT NULL DEFAULT 'other',
+          observed_on TEXT,
+          retrieved_at TEXT NOT NULL,
+          valid_until TEXT NOT NULL,
+          location TEXT,
+          confidence TEXT NOT NULL DEFAULT 'low',
+          availability TEXT,
+          delivery_cost REAL,
+          total_cost REAL,
+          selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),
+          raw_excerpt TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX market_research_project_idx ON market_research(project_id,research_key,retrieved_at DESC);
+        PRAGMA user_version = 4;
+      `);
+    })();
+  }
+  if (db.pragma('user_version', { simple: true }) < 5) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE research_jobs (
+          id TEXT PRIMARY KEY,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed')),
+          result_json TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX research_jobs_scope_idx ON research_jobs(project_id,conversation_id,updated_at DESC);
+        PRAGMA user_version = 5;
+      `);
+    })();
   }
 }
 migrate();

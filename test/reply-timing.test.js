@@ -56,14 +56,35 @@ test('ready reply starts audio without waiting for report generation', async () 
   const events = [];
   const send = browserFunction('sendMessage', '$("#message-form").addEventListener', {
     replyBusy: false, state: { project: { id: 1 } }, conversation: { conversation: { id: 1 } },
-    setReplyBusy: () => {}, addMessage: () => ({ remove() {}, classList: { add() {} } }),
+    setReplyBusy: () => {}, addMessage: () => ({ dataset:{}, remove() {}, classList: { add() {} } }),
+    setInterval:()=>1,clearInterval:()=>{},
     api: async () => ({ reply: 'التقرير جاهز', kind: 'report', period: { from: '2026-10-01', to: '2026-10-01' } }),
     lastReplyText: '', playReplyButton: {},
-    playReplyWithGemini: () => { events.push('audio'); return new Promise(() => {}); },
+    playReplyAudio: () => { events.push('audio'); return new Promise(() => {}); },
     downloadReport: () => { events.push('report'); return new Promise(() => {}); },
   });
   assert.equal(await send('التقرير'), true);
   assert.deepEqual(events, ['audio', 'report']);
+});
+
+test('completed background research renders its result and starts the returned audio stream', () => {
+  const messages=[],audio=[],streams=[];
+  class EventSource {
+    constructor(url){this.url=url;streams.push(this);}
+    close(){this.closed=true;}
+  }
+  const globals={
+    followedResearchJobs:new Set(),EventSource,
+    addMessage:text=>{const row={text,removed:false,remove(){this.removed=true;},classList:{add(){}}};messages.push(row);return row;},
+    addResearchSources:()=>{},lastReplyText:'',playReplyButton:{hidden:true},generatedAudio:null,
+    playReplyAudio:(text,auto,url)=>audio.push({text,auto,url}),refreshProjectData:()=>{},api:async()=>({status:'running'})
+  };
+  const follow=browserFunction('followResearchJob','async function sendMessage',globals);
+  follow('job-1',7);
+  streams[0].onmessage({data:JSON.stringify({status:'completed',result:{reply:'النتيجة المحسوبة جاهزة',speechText:'النتيجة جاهزة',speechStreamUrl:'/api/tts/stream/test',research:[]}})});
+  assert.equal(streams[0].closed,true);
+  assert.ok(messages.some(row=>row.text==='النتيجة المحسوبة جاهزة'));
+  assert.deepEqual(audio,[{text:'النتيجة جاهزة',auto:true,url:'/api/tts/stream/test'}]);
 });
 
 test('empty database prompts project creation and never requests a fixed project ID', async () => {

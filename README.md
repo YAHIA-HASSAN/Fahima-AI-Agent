@@ -1,18 +1,19 @@
-# Faheema (فهيمه)
+# fahima (فهيمة)
 
-Faheema is a local-first, Arabic conversational business assistant for micro and very small businesses. Owners can record sales, purchases, operating expenses, and household withdrawals; ask about recorded activity; and manage basic project information, confirmed project facts, products, stock, reminders, and reports.
+fahima is a local-first, Arabic conversational business assistant for micro and very small businesses. Owners can record sales, purchases, operating expenses, and household withdrawals; ask about recorded activity; and manage basic project information, confirmed project facts, products, stock, reminders, and reports.
 
 The MVP focuses on making business records easy to enter and understand. It is not a full accounting system: it keeps sales, purchases, and expenses distinct and does not label their difference as net profit. A purchase may still be in stock, and cost of goods sold is not necessarily known.
 
 ## What it does
 
-- Conversational chat in Egyptian Arabic, with a text composer and optional browser speech input and Gemini audio replies.
-- A confirmation step before a transaction or a newly suggested project fact is saved; multiple clear operations in one message can be reviewed and confirmed together.
+- Conversational chat in Egyptian Arabic, with a text composer, optional browser speech input, and direct streamed Gemini audio replies.
+- Automatic persistence of clear project facts, with confirmation before financial transactions; multiple clear operations in one message can be reviewed and confirmed together.
 - Multiple projects, each with separate conversations, confirmed facts, transactions, products, stock, and reminders.
 - Deterministic summaries and reports calculated from SQLite records.
 - A lightweight PDF report flow from the interface.
 - Gemini-powered intent extraction for free-form messages when GEMINI_API_KEY is configured; requests without a key receive a clear error instead of a misleading local guess.
-- Gemini enforces its own usage limits; when Gemini reports a limit, Faheema tells the user it is temporarily unavailable.
+- On-demand Google Search grounding for material prices, suppliers, requirements, and regulations, with cited sources and project-scoped freshness records.
+- Gemini enforces its own usage limits; when Gemini reports a limit, fahima tells the user it is temporarily unavailable.
 
 ## Requirements
 
@@ -64,12 +65,15 @@ npm run doctor
 | `GEMINI_API_KEY` | empty | Server-side key for Gemini. Never expose it in frontend code. |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini text model used for intent extraction. |
 | `GEMINI_TIMEOUT_MS` | `15000` | Gemini request timeout. Restart the server after changing `.env`, including the API key. |
+| `GEMINI_TTS_TIMEOUT_MS` | `8000` | Maximum wait for Gemini audio before keeping the written reply available. |
+| `GEMINI_SEARCH_TIMEOUT_MS` | `12000` | Maximum wait for each market-research request before returning an explicit fallback. |
+| `FAHIMA_DIAGNOSTICS` | `1` | Structured lifecycle logs without message text or secrets. Set to `0` to silence them. |
 | `AGENT_RECENT_MESSAGE_LIMIT` | `8` | Recent conversation messages included in agent context. |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | `6000` | Approximate working-context budget. |
 | `PORT` | `3000` | HTTP server port. |
-| `DB_PATH` | `./data/fahim.sqlite` | SQLite database file path. |
+| `DB_PATH` | `./data/fahima.sqlite` | SQLite database file path. If this variable is absent and only the legacy `fahim.sqlite` file exists, fahima opens it automatically so existing data is preserved. |
 
-Gemini controls the actual service quota. Faheema does not impose an additional local request or daily-use quota. When Gemini returns HTTP 429, the assistant responds that it is temporarily unavailable.
+Gemini controls the actual service quota. fahima does not impose an additional local request or daily-use quota. When Gemini returns HTTP 429, the assistant responds that it is temporarily unavailable.
 
 ## Architecture
 
@@ -77,7 +81,7 @@ Gemini controls the actual service quota. Faheema does not impose an additional 
 Browser UI (public/)
   ├─ Text chat
   ├─ Optional browser SpeechRecognition → Arabic transcript
-  └─ Gemini TTS WAV → browser audio playback
+  └─ Gemini TTS MP3 chunks → progressive browser playback
              │ JSON over same-origin HTTP
              ▼
 Express API (server/index.js)
@@ -85,7 +89,7 @@ Express API (server/index.js)
   ├─ Confirmation workflow for write operations
   ├─ Agent orchestration (server/agent.js)
   │    ├─ Gemini structured intent extraction and response validation
-  │    └─ Explicit confirmation/cancellation of staged data
+  │    └─ Grounded Google Search only when current external data affects the decision
   ├─ Allowlisted business tools (server/business-tools.js)
   ├─ Business operations and context (server/business.js)
   └─ Finance/date logic (server/finance.js)
@@ -98,17 +102,38 @@ Express API (server/index.js)
 
 The model helps interpret language and return a constrained intent. It does not receive direct database access and cannot choose a project scope. The server validates the intent, supplies the selected project ID to an allowlisted tool registry, and performs calculations using application code and SQLite. There is no open-ended model/tool execution loop.
 
-Write actions are staged for user confirmation before they are committed. Business summaries are calculated from stored records rather than generated by the model. The app deliberately avoids claiming a net profit without the cost-of-goods information needed to support that calculation.
+Clear user-stated facts save automatically with source and certainty metadata. Completed financial transactions are staged for confirmation. Proposed purchases stay in versioned plans and never enter the ledger. Business summaries are calculated from stored records rather than generated by the model. The app deliberately avoids claiming a net profit without the cost-of-goods information needed to support that calculation.
 
 ### Business data and write paths
 
 Product names, units, quantities, amounts, activities, and project facts come from user messages interpreted by Gemini. There is no product dictionary, seeded business example, or local financial-language parser. The server supplies current project records as context and checks the returned types, allowed intents, amounts, and dates. Missing quantities or units are never replaced with invented business values.
 
-The flow is **message → Gemini fields → server validation → pending review → explicit confirmation → SQLite**. Profile and memory forms also submit their contents through chat. Old direct business-write endpoints return 403; confirmation endpoints cannot replace the reviewed payload with client-supplied changes. Project creation/selection, deletion controls, and marking a reminder complete remain explicit interface management actions.
+The flow is **message → scoped context → validated Gemini interpretation → automatic factual memory → deterministic tools → advice and persistent next step**. Actual financial writes additionally go through pending review and explicit confirmation. The profile panel shows the current objective, goals, plan and progress instead of a fixed questionnaire. Memory edits are submitted through chat. Old direct business-write endpoints return 403; confirmation endpoints cannot replace the reviewed payload with client-supplied changes. Project creation/selection, deletion controls, and marking a reminder complete remain explicit interface management actions.
 
 Confirmed purchase totals are preserved even when a per-unit cost is a repeating decimal. A purchase with only a total is recorded financially without creating a stock quantity. New itemized purchases and their stock movements are saved atomically. Existing records are not rewritten by this change.
 
 UI text, transaction categories, schema constraints, date rules, arithmetic constants, and configurable runtime defaults are application rules, not business records. Example values in `test/` are isolated test fixtures. Tests use temporary SQLite databases and a mocked Gemini client; they do not verify live model accuracy.
+
+### Adaptive advisor
+
+One structured Gemini request interprets each ordinary message. It can extract several facts, revise a goal, select calculations, propose a plan, and choose one relevant question in the same turn. It receives a compact project context, not just recent messages. Narrow instruction-override checks remain local; ordinary business scope is interpreted by the model so unfamiliar activities are not rejected by a category keyword list.
+
+- `server/advisor-schema.js`: bounded facts, provenance, goals, questions, planning state, proposals and numeric operands.
+- `server/memory.js`: scoped current facts and revision history, goals, active objective, interrupted work, and plan versions. Hypotheses do not replace actual facts. Ambiguous conflicting values require clarification. Price observations retain source, date and certainty.
+- `server/planning.js`: budget allocation, affordable quantities after reserve, revenue, unit contribution, cost coverage, goal comparisons and cash from a dated opening balance. Missing operands remain missing. Assumptions are labelled. Starting capital is not treated as current cash.
+- `server/advisor.js`: applies clear facts and goals, executes the allowlisted scenario tool, maintains state and saves draft plans. Corrections invalidate old plans; stored calculation requests can be recalculated locally while the practical strategy remains marked for review.
+- `server/market-research.js`: uses Gemini Google Search grounding and URL context, accepts only cited numeric offers for calculations, and retains source, unit, location, confidence, retrieval time, and expiry metadata.
+- `server/response-quality.js`: translates known internal labels, suppresses repeated questions about known facts, rejects exposed syntax, unsupported numeric currency claims and obvious guarantees, and constructs arithmetic summaries from tool results. A failed check uses a safe local response, without a second provider call.
+
+Schema versions 3 through 5 add metadata to existing facts, fact history, project goals, advisor state, draft plan revisions, persistent request fingerprints, project-scoped market research, and persistent research-job status. Existing records remain in place. Completed message identities are retained so retries after a restart do not count a transaction twice. An unfinished request after a crash remains blocked for that identity rather than risking a duplicate write.
+
+Market research uses the existing Gemini provider and only runs when the model identifies a material missing or stale external fact. It first checks user prices and saved fresh research. A missing search runs after the main reply and reports its result through a project-scoped Server-Sent Events stream, so a slow provider does not keep the chat on “thinking.” Job state is stored in SQLite; the browser can recover the terminal result through a status endpoint if the event stream disconnects. Each provider request has a bounded timeout and ends with either a sourced result or an explicit conditional fallback. Grounded results are stored separately from user facts and transactions; expired results remain visible as stale history but are excluded from calculations. A cited online offer is still a planning input: availability, delivery, taxes, and local suitability need confirmation before purchase. Google may meter grounded searches under the configured Gemini account; fahima adds no separate search provider or dependency. See [Google's grounding guide](https://ai.google.dev/gemini-api/docs/google-search/) for provider behavior and pricing notes.
+
+Direct requests such as “احسب وقولي” and “وريني حسابات الشهر ده” must select an executable calculation, search, plan, or report path. The server rejects a generated promise to act when no action was actually selected. Follow-ups such as “فين؟” read the latest research job for the current project and conversation, then return its result, active status, or failure reason.
+
+The voice reply summarizes the advice; the plan panel displays detailed assumptions, steps, risks and calculations. Each chat response includes a short-lived Gemini stream URL, so the browser starts the MP3 request immediately and plays chunks as they arrive instead of waiting for a complete audio blob. Audio generation never disables text input, and failure still leaves the text response available.
+
+See [manual advisor evaluation](docs/advisor-evaluation.md) for the representative conversation checks and the distinction between mocked tests and live model evaluation.
 
 ### Memory and persistence
 
@@ -119,22 +144,29 @@ UI text, transaction categories, schema constraints, date rules, arithmetic cons
 
 ### Voice and privacy
 
-Voice input uses browser speech recognition. The app automatically generates each reply as Gemini TTS audio and plays it in the browser:
+Voice input uses browser speech recognition. Output comes directly from Gemini as a progressive MP3 stream:
 
 ```text
 Microphone → browser SpeechRecognition (ar-EG where available)
            → transcript → existing /api/chat pipeline
-           → text response → Gemini TTS → automatic browser audio playback
+           → text response + one-use stream URL
+           → Gemini TTS → MP3 chunks → browser playback
 ```
 
-Faheema does not send microphone audio to Gemini: browser speech recognition converts it to text first. After each assistant reply, the reply text is sent to Gemini TTS using the server-side API key and the returned WAV is played by the browser. TTS requires a configured key and available Gemini service. The interface does not substitute a system voice when Gemini TTS fails, to avoid speaking Arabic replies with an unrelated language or voice. Browser speech recognition is browser/platform dependent and may use the browser vendor's service, so it is not guaranteed to be offline.
+fahima does not send microphone audio to Gemini: browser speech recognition converts it to text first. For output, the server creates a short-lived one-use URL and forwards Gemini MP3 chunks as they arrive. Gemini TTS requires a configured key and available quota. Browser speech recognition depends on the browser and operating system and may use the browser vendor's service, so it is not guaranteed to be offline.
 
 ## Project structure
 
 ```text
 server/
   index.js          Express app, API routes, orchestration, request validation
-  agent.js          Intent schema, validated Gemini interpretation, context compaction
+  agent.js          Adaptive prompt, validated Gemini interpretation, bounded context
+  advisor*.js       Advisory orchestration and structured output schema
+  memory.js         Factual memory, goals, state and plan revisions
+  planning.js       Deterministic scenario arithmetic
+  response-quality.js Language and response guards
+  market-research.js Grounded web research, citation checks, freshness metadata
+  research-jobs.js Non-blocking market research jobs and live SSE updates
   business-tools.js Project-scoped allowlisted read tools
   business.js       Projects, conversations, facts, transactions, products, inventory
   finance.js        Date validation, number formatting, deterministic summaries
@@ -152,7 +184,8 @@ test/
   finance.test.js
   agent-architecture.test.js
 data/
-  fahim.sqlite      Local application database (created during setup)
+  fahima.sqlite     Local application database for a new setup
+  fahim.sqlite      Legacy filename, opened automatically when it is the existing database
 ```
 
 ## Security and deployment notes
@@ -161,4 +194,4 @@ This is a local, single-user application without login or account-level authoriz
 
 ## Current scope
 
-Faheema is an MVP, not a complete accounting or inventory platform. It does not calculate final net profit, provide market prices, or guarantee browser voice support. Reports and answers reflect only data entered and confirmed in the selected project.
+fahima is an MVP, not a complete accounting or inventory platform. It does not calculate final net profit or guarantee browser speech recognition or Gemini audio availability. Online prices are temporary cited planning inputs rather than confirmed availability or purchase quotes. Reports and answers reflect stored project data, confirmed transactions, explicit assumptions, and any displayed research sources.
