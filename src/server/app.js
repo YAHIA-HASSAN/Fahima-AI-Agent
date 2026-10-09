@@ -74,7 +74,9 @@ function createApp({ db, config, agent, tts }) {
     const projectId = Number(req.params.id);
     if (!projects.get(projectId)) return res.status(404).json({ error: 'المشروع غير موجود.' });
     const conversation = db.prepare('SELECT id,title,updated_at FROM conversations WHERE project_id=? ORDER BY updated_at DESC,id DESC LIMIT 1').get(projectId);
-    const messages = conversation ? db.prepare('SELECT id,role,content,input_type,created_at FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 100').all(conversation.id).reverse() : [];
+    const messages = conversation ? db.prepare(`SELECT m.id,m.role,m.content,m.input_type,m.created_at,t.result_json
+      FROM messages m LEFT JOIN fahima_v2_deliveries d ON d.assistant_message_id=m.id LEFT JOIN fahima_v2_tasks t ON t.id=d.task_id
+      WHERE m.conversation_id=? ORDER BY m.id DESC LIMIT 100`).all(conversation.id).reverse().map(row=>{const result=parse(row.result_json);const message={id:row.id,role:row.role,content:row.content,input_type:row.input_type,created_at:row.created_at};if(row.role==='assistant'&&result?.plan)message.plan=result.plan;return message;}) : [];
     const activeTask = conversation ? db.prepare("SELECT id,status FROM fahima_v2_tasks WHERE project_id=? AND conversation_id=? AND status IN ('QUEUED','RUNNING') ORDER BY created_at DESC LIMIT 1").get(projectId, conversation.id) : null;
     res.json({ conversation: conversation || null, messages, activeTask: activeTask || null });
   });

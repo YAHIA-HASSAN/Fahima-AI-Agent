@@ -1,20 +1,457 @@
-const $=selector=>document.querySelector(selector);
-let projectId=null,conversationId=null,busy=false,lastReply='',activeTaskId=null;
-function bubble(text,role='assistant'){const node=document.createElement('div');node.className=`bubble ${role}`;node.textContent=text;$('#messages').append(node);$('#messages').scrollTop=$('#messages').scrollHeight;return node;}
-async function api(url,options={}){const response=await fetch(url,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.error||'حصلت مشكلة مؤقتة.');return body;}
-async function loadProjects(){const data=await api('/api/projects');$('#projects').replaceChildren(...data.projects.map(project=>{const option=document.createElement('option');option.value=project.id;option.textContent=project.name;return option;}));if(!projectId&&data.projects.length)projectId=data.projects[0].id;$('#projects').value=projectId||'';await loadProjectData();}
-async function loadProjectData(){if(!projectId)return;conversationId=null;$('#messages').replaceChildren();$('#plan').textContent='مفيش خطة محفوظة لسه.';const [plan,history]=await Promise.all([api(`/api/projects/${projectId}/plan`),api(`/api/projects/${projectId}/conversation`)]);if(plan.plan)renderPlan(plan.plan);if(history.conversation){conversationId=history.conversation.id;for(const message of history.messages)bubble(message.content,message.role==='user'?'user':'assistant');lastReply=[...history.messages].reverse().find(message=>message.role==='assistant')?.content||'';$('#playReply').hidden=!lastReply;}else $('#playReply').hidden=true;if(history.activeTask){busy=true;$('#send').disabled=$('#voice').disabled=true;void waitForTask(history.activeTask.id).finally(()=>{busy=false;$('#send').disabled=$('#voice').disabled=false;});}}
-async function sendMessage(text,inputMode='text'){if(busy||!projectId||!text.trim())return;busy=true;$('#send').disabled=$('#voice').disabled=true;$('#status').textContent='فهيمة بتراجع سؤالك…';bubble(text,'user');$('#input').value='';try{const data=await api('/api/chat',{method:'POST',body:JSON.stringify({projectId,conversationId,message:text,inputMode,requestId:crypto.randomUUID()})});conversationId=data.conversationId;await waitForTask(data.taskId,inputMode==='voice');}catch(error){bubble(error.message);$('#status').textContent='';}finally{busy=false;$('#send').disabled=$('#voice').disabled=false;$('#input').focus();}}
-async function waitForTask(id,autoSpeak=false){for(let i=0;i<180;i++){const data=await api(`/api/tasks/${id}?projectId=${projectId}`);if(['COMPLETE','PROVISIONAL','WAITING_FOR_INPUT','FAILED','CANCELLED'].includes(data.task.status)){if(data.message){bubble(data.message.content);lastReply=data.message.content;$('#playReply').hidden=false;if(data.task.result?.plan?.qualityStatus)await loadPlan();if(autoSpeak)void speakReply();}else bubble(data.task.result?.answer||'');$('#status').textContent=data.task.status==='WAITING_FOR_INPUT'?'فهيمة محتاجة معلومة واحدة عشان تكمل.':'';return;}$('#status').textContent=`فهيمة شغالة (${data.task.status.toLowerCase()})…`;await new Promise(resolve=>setTimeout(resolve,800));}$('#status').textContent='المهمة مستمرة؛ تقدري ترجعي تتابعيها بعد لحظات.';}
-async function loadPlan(){const data=await api(`/api/projects/${projectId}/plan`);if(data.plan)renderPlan(data.plan);}
-function renderPlan(saved){const plan=saved.plan;const lines=[saved.quality_status==='PROVISIONAL'?'خطة مبدئية':'خطة مكتملة',plan.objective,'',...plan.steps.map((step,i)=>`${i+1}. ${step}`)];if(plan.budget){lines.push('','الميزانية:');for(const item of plan.budget.items||[])lines.push(`• ${item.name}: ${item.totalCost} جنيه`);lines.push(`الإجمالي: ${plan.budget.total} جنيه`,`المتبقي: ${plan.budget.remaining} جنيه`);if(plan.budget.reserve>0)lines.push(`احتياطي مقترح من فهيمة: ${plan.budget.reserve} جنيه (${plan.budget.reserveRationale||'السبب موضح في الخطة'})`);}if(plan.assumptions?.length)lines.push('','الافتراضات:',...plan.assumptions.map(item=>`• ${item}`));if(plan.risks?.length)lines.push('','المخاطر:',...plan.risks.map(item=>`• ${item}`));if(plan.missingInformation?.length)lines.push('','معلومات لسه ناقصة:',...plan.missingInformation.map(item=>`• ${item}`));$('#plan').replaceChildren(document.createTextNode(lines.join('\n')));if(plan.sources?.length){const list=document.createElement('div');list.append(document.createTextNode('\nمصادر البحث:'));for(const source of plan.sources.slice(0,8)){const link=document.createElement('a');link.href=source.url;link.target='_blank';link.rel='noopener noreferrer';link.textContent=`\n${source.title||source.url}`;list.append(link);}$('#plan').append(list);}}
-$('#send').addEventListener('click',()=>sendMessage($('#input').value));$('#input').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage($('#input').value);}});$('#projects').addEventListener('change',async event=>{projectId=Number(event.target.value);await loadProjectData();});$('#newProject').addEventListener('click',async()=>{const name=prompt('اسم المشروع الجديد؟');if(!name?.trim())return;const result=await api('/api/projects',{method:'POST',body:JSON.stringify({name})});projectId=result.project.id;await loadProjects();});
-const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;if(SpeechRecognition){$('#voice').addEventListener('click',()=>{const recognition=new SpeechRecognition();recognition.lang='ar-EG';recognition.interimResults=false;$('#status').textContent='اتكلمي دلوقتي…';recognition.onresult=event=>sendMessage(event.results[0][0].transcript,'voice');recognition.onerror=()=>$('#status').textContent='الصوت مش متاح دلوقتي؛ اكتبي رسالتك.';recognition.start();});}else $('#voice').disabled=true;
-async function speakReply(){if(!lastReply)return;let context;try{const audioApi=window.AudioContext||window.webkitAudioContext;if(!audioApi)throw new Error('تشغيل الصوت مش متاح في المتصفح.');context=new audioApi({sampleRate:24000});await context.resume();$('#playReply').disabled=true;$('#playReply').textContent='⏳ بجهز الصوت…';const ticket=await api('/api/tts/ticket',{method:'POST',body:JSON.stringify({text:lastReply})});const response=await fetch(ticket.streamUrl);if(!response.ok){const failure=await response.json().catch(()=>({}));throw new Error(failure.error||'تعذر تجهيز الصوت.');}const reader=response.body.getReader();let carry=new Uint8Array(0),scheduled=context.currentTime+0.04,received=false;while(true){const {done,value}=await reader.read();if(done)break;let bytes=value;if(carry.length){const joined=new Uint8Array(carry.length+value.length);joined.set(carry);joined.set(value,carry.length);bytes=joined;}const usable=bytes.length-bytes.length%2;carry=bytes.slice(usable);if(!usable)continue;const samples=usable/2,buffer=context.createBuffer(1,samples,24000),channel=buffer.getChannelData(0);for(let index=0;index<samples;index++){let sample=bytes[index*2]|bytes[index*2+1]<<8;if(sample>=32768)sample-=65536;channel[index]=sample/32768;}const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);scheduled=Math.max(scheduled,context.currentTime+0.02);source.start(scheduled);scheduled+=buffer.duration;if(!received){received=true;$('#status').textContent='فهيمة بتقرأ الرد بصوت Gemini.';}}if(!received)throw new Error('Gemini مرجعش صوت قابل للتشغيل.');await new Promise(resolve=>setTimeout(resolve,Math.max(0,(scheduled-context.currentTime)*1000)));}catch(error){if('speechSynthesis'in window){window.speechSynthesis.cancel();const utterance=new SpeechSynthesisUtterance(lastReply);utterance.lang='ar-EG';window.speechSynthesis.speak(utterance);$('#status').textContent='صوت Gemini مش متاح؛ بستخدم الصوت المحلي في جهازك. الرد المكتوب موجود.';}else $('#status').textContent=`${error.message} الرد المكتوب موجود.`;}finally{context?.close();$('#playReply').disabled=false;$('#playReply').textContent='🔊 اسمع الرد';}}
-$('#playReply').addEventListener('click',speakReply);
-function localToday(){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());return `${parts.find(x=>x.type==='year').value}-${parts.find(x=>x.type==='month').value}-${parts.find(x=>x.type==='day').value}`;}
-const today=localToday();$('#reportTo').value=today;$('#reportFrom').value=`${today.slice(0,8)}01`;$('#loadReport').addEventListener('click',async()=>{try{const report=await api(`/api/projects/${projectId}/report?from=${encodeURIComponent($('#reportFrom').value)}&to=${encodeURIComponent($('#reportTo').value)}`);const labels={income:'إيرادات',stock_cost:'مشتريات',operating_expense:'مصروفات تشغيل',withdrawal:'مسحوبات'};const lines=Object.entries(report.totals).map(([type,value])=>`${labels[type]||type}: ${value.confirmed.toLocaleString('ar-EG')} جنيه (${value.count} عملية)`);$('#report').textContent=`${lines.join('\n')||'مفيش معاملات في الفترة دي.'}\n\n${report.note}`;}catch(error){$('#report').textContent=error.message;}});
-const originalLoadProjectData=loadProjectData;
-loadProjectData=async()=>{await originalLoadProjectData();if(!projectId)return;const [inventory,records,plan]=await Promise.all([api(`/api/projects/${projectId}/inventory`),api(`/api/projects/${projectId}/transactions`),api(`/api/projects/${projectId}/plan`)]);$('#inventory').textContent=inventory.items.map(row=>`${row.name}: ${row.current_quantity} ${row.unit}`).join('\n')||'مفيش أصناف مسجلة.';const list=$('#transactions');list.replaceChildren();const active=records.transactions.filter(row=>!row.voided_at).slice(0,20);for(const row of active){const entry=document.createElement('div');entry.textContent=`#${row.id} · ${row.type} · ${row.amount} جنيه · ${row.date} · ${row.description} `;const cancel=document.createElement('button');cancel.textContent='إلغاء';cancel.addEventListener('click',()=>{const reason=prompt(`سبب إلغاء المعاملة رقم ${row.id}؟`);if(reason?.trim())void sendMessage(`ألغِي المعاملة رقم ${row.id}. السبب: ${reason.trim()}`);});const correct=document.createElement('button');correct.textContent='تصحيح';correct.addEventListener('click',()=>{const amount=prompt(`المبلغ الصحيح للمعاملة رقم ${row.id}؟`,String(row.amount));if(amount&&Number.isFinite(Number(amount))){const reason=prompt('إيه سبب التصحيح؟');if(reason?.trim())void sendMessage(`صححي المعاملة رقم ${row.id} إلى مبلغ ${Number(amount)} جنيه. السبب: ${reason.trim()}`);}});entry.append(cancel,correct);list.append(entry);}if(!active.length)list.textContent='مفيش معاملات مسجلة.';if(plan.plan){renderPlan(plan.plan);const steps=document.createElement('div');steps.append(document.createTextNode('\nحالة الخطوات:'));for(const step of plan.steps||[]){const row=document.createElement('div');row.textContent=`${step.status==='complete'?'✓':'○'} ${step.title} `;const toggle=document.createElement('button');toggle.textContent=step.status==='complete'?'إعادة فتح':'تمت';toggle.addEventListener('click',()=>void sendMessage(`حدّثي الخطوة رقم ${step.index+1} في النسخة ${plan.plan.revision} من الخطة إلى ${step.status==='complete'?'قيد التنفيذ':'مكتملة'}.`));row.append(toggle);steps.append(row);}$('#plan').append(steps);}};
-$('#cancelTask').addEventListener('click',async()=>{if(!activeTaskId)return;try{await api(`/api/tasks/${activeTaskId}/cancel`,{method:'POST',body:JSON.stringify({projectId})});$('#status').textContent='طلبت إلغاء المهمة…';}catch(error){$('#status').textContent=error.message;}});
-loadProjects().catch(error=>{$('#health').textContent='فهيمة مش متصلة';$('#status').textContent=error.message;});
+const $ = (s) => document.querySelector(s);
+let projectId = null,
+  conversationId = null,
+  busy = false,
+  lastReply = "",
+  activeTaskId = null,
+  audioContext = null,
+  audioSources = [],
+  audioRunning = false,
+  audioStopped = false;
+function bubble(text, role = "assistant", plan = null) {
+  const node = document.createElement("div");
+  node.className = `bubble ${role}`;
+  node.textContent = text;
+  $("#messages").append(node);
+  if (plan) $("#messages").append(planCard(plan));
+  $("#messages").scrollTop = $("#messages").scrollHeight;
+  return node;
+}
+function planCard(saved, full = false) {
+  const plan = saved?.plan || saved || {};
+  const card = document.createElement("article");
+  card.className = "plan-card";
+  const title = document.createElement("h3");
+  title.textContent = plan.objective || "خطة المشروع";
+  card.append(title);
+  const status = document.createElement("span");
+  status.className = "plan-status";
+  status.textContent =
+    (saved.qualityStatus || saved.quality_status) === "COMPLETE"
+      ? "خطة مكتملة"
+      : "خطة مبدئية";
+  card.append(status);
+  if (plan.budget) {
+    const money = document.createElement("p");
+    money.textContent = `رأس المال: ${Number(plan.budget.capital || 0).toLocaleString("ar-EG")} جنيه · إجمالي مقترح: ${Number(plan.budget.total || 0).toLocaleString("ar-EG")} جنيه`;
+    card.append(money);
+  }
+  const steps = document.createElement("div");
+  steps.innerHTML = "<strong>الخطوات الجاية</strong>";
+  const list = document.createElement("ol");
+  for (const step of (plan.steps || []).slice(0, 3)) {
+    const li = document.createElement("li");
+    li.textContent = step;
+    list.append(li);
+  }
+  steps.append(list);
+  card.append(steps);
+  if (
+    (plan.steps || []).length > 3 ||
+    plan.risks?.length ||
+    plan.assumptions?.length ||
+    plan.missingInformation?.length ||
+    plan.sources?.length
+  ) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = full ? "تفاصيل الخطة" : "شوفي الخطة";
+    details.append(summary);
+    details.append(fullPlan(plan));
+    card.append(details);
+  }
+  return card;
+}
+function fullPlan(plan) {
+  const box = document.createElement("div");
+  const add = (label, items) => {
+    if (!items?.length) return;
+    const h = document.createElement("p");
+    h.innerHTML = `<strong>${label}</strong><br>${items.map((x) => `• ${escapeHtml(x)}`).join("<br>")}`;
+    box.append(h);
+  };
+  add("الخطوات", plan.steps);
+  add("الافتراضات", plan.assumptions);
+  add("المخاطر", plan.risks);
+  add("المعلومات الناقصة", plan.missingInformation);
+  if (plan.budget) {
+    const b = document.createElement("p");
+    b.innerHTML = `<strong>الميزانية</strong><br>الإجمالي: ${Number(plan.budget.total || 0).toLocaleString("ar-EG")} جنيه<br>المتبقي: ${Number(plan.budget.remaining || 0).toLocaleString("ar-EG")} جنيه`;
+    box.append(b);
+  }
+  if (plan.sources?.length) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "شوفي المصادر";
+    details.append(summary);
+    for (const source of plan.sources) {
+      const a = document.createElement("a");
+      a.href = source.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = source.title || source.url;
+      details.append(a, document.createElement("br"));
+    }
+    box.append(details);
+  }
+  return box;
+}
+function escapeHtml(value) {
+  const node = document.createElement("span");
+  node.textContent = value;
+  return node.innerHTML;
+}
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || "حصلت مشكلة مؤقتة.");
+  return body;
+}
+async function loadProjects() {
+  const data = await api("/api/projects");
+  $("#projects").replaceChildren(
+    ...data.projects.map((p) => {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.name;
+      return o;
+    }),
+  );
+  if (!projectId && data.projects.length) projectId = data.projects[0].id;
+  $("#projects").value = projectId || "";
+  $("#projectName").textContent =
+    data.projects.find((p) => p.id === Number(projectId))?.name ||
+    "مستشارة مشروعك";
+  await loadProjectData();
+}
+async function loadProjectData() {
+  if (!projectId) return;
+  conversationId = null;
+  $("#messages").replaceChildren();
+  closePanels();
+  const [plan, history, records] = await Promise.all([
+    api(`/api/projects/${projectId}/plan`),
+    api(`/api/projects/${projectId}/conversation`),
+    api(`/api/projects/${projectId}/transactions`),
+  ]);
+  if (history.conversation) {
+    conversationId = history.conversation.id;
+    for (const message of history.messages)
+      bubble(
+        message.content,
+        message.role === "user" ? "user" : "assistant",
+        message.plan,
+      );
+    lastReply =
+      [...history.messages].reverse().find((m) => m.role === "assistant")
+        ?.content || "";
+    $("#playReply").hidden = !lastReply;
+  }
+  if (history.activeTask) {
+    busy = true;
+    activeTaskId = history.activeTask.id;
+    $("#cancelTask").hidden = false;
+    void waitForTask(activeTaskId).finally(finishBusy);
+  }
+  renderSidebarPlan(plan, records);
+}
+function renderSidebarPlan(data, records) {
+  const saved = data.plan;
+  $("#plan").replaceChildren();
+  if (saved) {
+    const title = document.createElement("strong");
+    title.textContent = saved.plan.objective || "الخطة الحالية";
+    $("#plan").append(title);
+    const p = document.createElement("p");
+    p.textContent =
+      (saved.qualityStatus || saved.quality_status) === "COMPLETE"
+        ? "خطة مكتملة"
+        : "خطة مبدئية";
+    $("#plan").append(p);
+    const button = document.createElement("button");
+    button.className = "outline-button";
+    button.textContent = "شوف الخطة";
+    button.onclick = () => {
+      const old = $("#plan").querySelector(".plan-card");
+      if (old) old.remove();
+      $("#plan").append(planCard(saved, true));
+    };
+    $("#plan").append(button);
+  } else $("#plan").textContent = "مفيش خطة محفوظة لسه.";
+  const list = $("#transactions");
+  list.replaceChildren();
+  for (const row of records.transactions
+    .filter((r) => !r.voided_at)
+    .slice(0, 20)) {
+    const item = document.createElement("div");
+    item.className = "transaction-row";
+    item.textContent = `${row.type} · ${row.amount} جنيه · ${row.date}`;
+    list.append(item);
+  }
+  if (!records.transactions.length) list.textContent = "مفيش معاملات مسجلة.";
+}
+async function sendMessage(text, inputMode = "text") {
+  if (busy || !projectId || !text.trim()) return;
+  busy = true;
+  $("#send").disabled = $("#voice").disabled = true;
+  $("#status").textContent = "فهيمة بتفكر…";
+  bubble(text, "user");
+  $("#input").value = "";
+  try {
+    const data = await api("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        projectId,
+        conversationId,
+        message: text,
+        inputMode,
+        requestId: crypto.randomUUID(),
+      }),
+    });
+    conversationId = data.conversationId;
+    activeTaskId = data.taskId;
+    $("#cancelTask").hidden = false;
+    await waitForTask(data.taskId, inputMode === "voice");
+  } catch (error) {
+    bubble(error.message);
+    $("#status").textContent = "";
+  } finally {
+    finishBusy();
+  }
+}
+function finishBusy() {
+  busy = false;
+  activeTaskId = null;
+  $("#cancelTask").hidden = true;
+  $("#send").disabled = $("#voice").disabled = false;
+  $("#input").focus();
+}
+async function waitForTask(id, autoSpeak = false) {
+  for (let i = 0; i < 180; i++) {
+    const data = await api(`/api/tasks/${id}?projectId=${projectId}`);
+    if (
+      [
+        "COMPLETE",
+        "PROVISIONAL",
+        "WAITING_FOR_INPUT",
+        "FAILED",
+        "CANCELLED",
+      ].includes(data.task.status)
+    ) {
+      if (data.message) {
+        const saved = data.task.result?.plan;
+        if (data.message.content)
+          bubble(data.message.content, "assistant", saved);
+        lastReply = data.message.content;
+        $("#playReply").hidden = !lastReply;
+        if (autoSpeak) void speakReply();
+      } else bubble(data.task.result?.answer || "");
+      if (data.task.result?.plan) await loadProjectData();
+      $("#status").textContent =
+        data.task.status === "WAITING_FOR_INPUT"
+          ? "فهيمة محتاجة معلومة واحدة."
+          : data.task.status === "CANCELLED"
+            ? "المهمة اتلغت."
+            : "";
+      return;
+    }
+    $("#status").textContent = "فهيمة شغالة…";
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  $("#status").textContent = "المهمة لسه شغالة؛ تقدري ترجعي بعد شوية.";
+}
+function closePanels() {
+  for (const id of ["planPanel", "recordsPanel", "reportPanel"])
+    $("#" + id).classList.add("collapsed");
+  for (const id of ["planToggle", "recordsToggle", "reportToggle"])
+    $("#" + id).setAttribute("aria-expanded", "false");
+}
+function togglePanel(button, panel) {
+  const el = $("#" + panel),
+    open = el.classList.toggle("collapsed") === false;
+  button.setAttribute("aria-expanded", String(open));
+}
+$("#planToggle").onclick = () => togglePanel($("#planToggle"), "planPanel");
+$("#recordsToggle").onclick = () =>
+  togglePanel($("#recordsToggle"), "recordsPanel");
+$("#reportToggle").onclick = () =>
+  togglePanel($("#reportToggle"), "reportPanel");
+$("#menu").onclick = () => $("#sidebar").classList.toggle("open");
+$("#send").onclick = () => sendMessage($("#input").value);
+$("#input").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage($("#input").value);
+  }
+};
+$("#projects").onchange = async (e) => {
+  projectId = Number(e.target.value);
+  await loadProjectData();
+};
+$("#newProject").onclick = async () => {
+  const name = prompt("اسم المشروع؟");
+  if (name?.trim()) {
+    const result = await api("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    projectId = result.project.id;
+    await loadProjects();
+  }
+};
+const SpeechRecognition =
+  window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SpeechRecognition) {
+  $("#voice").onclick = () => {
+    const recognition = new SpeechRecognition();
+    recognition.lang = "ar-EG";
+    recognition.interimResults = false;
+    $("#status").textContent = "اتكلمي دلوقتي…";
+    recognition.onresult = (e) =>
+      sendMessage(e.results[0][0].transcript, "voice");
+    recognition.onerror = () =>
+      ($("#status").textContent = "الإملاء الصوتي مش متاح؛ اكتبي رسالتك.");
+    recognition.start();
+  };
+} else $("#voice").disabled = true;
+async function speakReply() {
+  if (!lastReply || audioRunning) return;
+  let context;
+  try {
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) throw new Error("الصوت مش متاح في المتصفح.");
+    context = audioContext = new Audio({ sampleRate: 24000 });
+    await context.resume();
+    audioStopped = false;
+    audioSources = [];
+    $("#playReply").disabled = true;
+    $("#playReply").textContent = "⏳ بجهز الصوت…";
+    const ticket = await api("/api/tts/ticket", {
+      method: "POST",
+      body: JSON.stringify({ text: lastReply }),
+    });
+    const response = await fetch(ticket.streamUrl);
+    if (!response.ok) throw new Error("الصوت مش متاح دلوقتي.");
+    const reader = response.body.getReader();
+    let carry = new Uint8Array(0),
+      scheduled = context.currentTime + 0.04,
+      received = false;
+    audioRunning = true;
+    $("#pauseReply").hidden = false;
+    $("#stopReply").hidden = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || audioStopped) break;
+      let bytes = value;
+      if (carry.length) {
+        const joined = new Uint8Array(carry.length + value.length);
+        joined.set(carry);
+        joined.set(value, carry.length);
+        bytes = joined;
+      }
+      const usable = bytes.length - (bytes.length % 2);
+      carry = bytes.slice(usable);
+      if (!usable) continue;
+      const buffer = context.createBuffer(1, usable / 2, 24000),
+        channel = buffer.getChannelData(0);
+      for (let i = 0; i < usable / 2; i++) {
+        let sample = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
+        if (sample >= 32768) sample -= 65536;
+        channel[i] = sample / 32768;
+      }
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      scheduled = Math.max(scheduled, context.currentTime + 0.02);
+      source.start(scheduled);
+      audioSources.push(source);
+      scheduled += buffer.duration;
+      if (!received) {
+        received = true;
+        $("#status").textContent = "فهيمة بتقرأ الرد بصوت Gemini.";
+      }
+    }
+    if (!received && !audioStopped) throw new Error("الصوت مش متاح دلوقتي.");
+    if (!audioStopped)
+      await new Promise((r) =>
+        setTimeout(r, Math.max(0, (scheduled - context.currentTime) * 1000)),
+      );
+  } catch (error) {
+    if (!audioStopped) $("#status").textContent = "الصوت مش متاح دلوقتي.";
+  } finally {
+    audioRunning = false;
+    audioContext?.close();
+    audioContext = null;
+    audioSources = [];
+    $("#playReply").disabled = false;
+    $("#playReply").textContent = "🔊 اسمعي الرد";
+    $("#pauseReply").hidden = true;
+    $("#stopReply").hidden = true;
+  }
+}
+$("#playReply").onclick = speakReply;
+$("#pauseReply").onclick = async () => {
+  if (!audioContext) return;
+  if (audioContext.state === "running") {
+    await audioContext.suspend();
+    $("#pauseReply").textContent = "▶ استكملي";
+  } else {
+    await audioContext.resume();
+    $("#pauseReply").textContent = "⏸ إيقاف مؤقت";
+  }
+};
+$("#stopReply").onclick = () => {
+  audioStopped = true;
+  for (const source of audioSources)
+    try {
+      source.stop();
+    } catch {}
+  audioContext?.close();
+};
+$("#cancelTask").onclick = async () => {
+  if (activeTaskId)
+    await api(`/api/tasks/${activeTaskId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ projectId }),
+    });
+};
+function localToday() {
+  const p = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Cairo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  return `${p.find((x) => x.type === "year").value}-${p.find((x) => x.type === "month").value}-${p.find((x) => x.type === "day").value}`;
+}
+const today = localToday();
+$("#reportTo").value = today;
+$("#reportFrom").value = `${today.slice(0, 8)}01`;
+$("#loadReport").onclick = async () => {
+  try {
+    const report = await api(
+      `/api/projects/${projectId}/report?from=${$("#reportFrom").value}&to=${$("#reportTo").value}`,
+    );
+    const labels = {
+      income: "مبيعات",
+      stock_cost: "مشتريات",
+      operating_expense: "مصروفات",
+      withdrawal: "مسحوبات",
+    };
+    $("#report").textContent =
+      Object.entries(report.totals)
+        .map(
+          ([type, v]) =>
+            `${labels[type] || type}: ${Number(v.confirmed).toLocaleString("ar-EG")} جنيه`,
+        )
+        .join("\n") || "مفيش معاملات في الفترة دي.";
+  } catch (e) {
+    $("#report").textContent = e.message;
+  }
+};
+loadProjects().catch((e) => {
+  $("#status").textContent = e.message;
+});
