@@ -39,10 +39,20 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
   const base = `http://127.0.0.1:${server.address().port}`;
   let next = interpreted();
   let prompt = '';
+  let finalResponseCalls=0;
   let providerError = null;
   agent.__setGeminiClientForTests({ interactions: { async create(request) {
     prompt = request.input;
     if (providerError) throw providerError;
+    const schema=request.response_format?.[0]?.schema;
+    if(schema&&Object.keys(schema.properties||{}).length===1&&schema.properties.answer) {
+      finalResponseCalls++;
+      const marker='نتيجة الأداة الفعلية:\n';
+      const observation=JSON.parse(String(request.input).split(marker).at(-1));
+      const rows=observation.transactions||[observation.transaction].filter(Boolean);
+      const total=rows.reduce((sum,row)=>sum+Number(row.amount||0),0).toLocaleString('ar-EG');
+      return {output_text:JSON.stringify({answer:`تمام، سجلت ${rows.length.toLocaleString('ar-EG')} عملية بإجمالي ${total} جنيه.`})};
+    }
     return { output_text: JSON.stringify(next) };
   } } });
   async function api(route, body, method = body === undefined ? 'GET' : 'POST') {
@@ -79,7 +89,8 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       const result = pending;
       assert.equal(result.body.kind, 'saved');
       assert.equal(result.body.transaction.amount, 100);
-      assert.equal(result.body.reply,'تمام، سجلت شراء بضاعة بـ١٠٠ جنيه.');
+      assert.equal(result.body.reply,'تمام، سجلت ١ عملية بإجمالي ١٠٠ جنيه.');
+      assert.equal(finalResponseCalls,1);
       assert.equal(result.body.transaction.project_id, projectId);
       assert.equal(B.getProducts(first.id).length, 0);
       const product = B.getProducts(projectId)[0];
@@ -180,10 +191,10 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       const product = `بيض ${randomUUID()}`;
       const unit = `بيضة ${randomUUID().slice(0,8)}`;
       const incomplete = await chat({ intent: 'record_transaction', transaction_type: 'income', amount: null,
-        product_name: product, quantity: 5, unit }, 'أنا بعت ٥ بيضات');
+        product_name: product, quantity: 5, unit,question:{text:'بعتهم كلهم بكام؟',expected_field:'unit_price',fact_key:null,reason:'تسجيل قيمة البيع'} }, 'أنا بعت ٥ بيضات');
       assert.equal(incomplete.body.kind, 'clarify');
       assert.equal(incomplete.body.pending.payload.waiting_for, 'unit_price');
-      assert.equal(incomplete.body.reply, `٥ ${unit} ${product} اتباعوا بكام كلهم؟`);
+      assert.equal(incomplete.body.reply, 'بعتهم كلهم بكام؟');
       assert.equal((incomplete.body.reply.match(/[؟?]/gu)||[]).length,1);
       next = interpreted({ intent: 'record_transaction', transaction_type: null, amount: 5 });
       const completed = await api('/api/chat', { projectId, conversationId, message: '٥', requestId: randomUUID() });

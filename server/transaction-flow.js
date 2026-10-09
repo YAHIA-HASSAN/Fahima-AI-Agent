@@ -10,18 +10,6 @@ function periodLabel(period) {
   return period === 'week' ? 'الأسبوع ده' : period === 'month' ? 'الشهر ده' : period === 'all' ? 'كل الفترة' : 'النهارده';
 }
 
-function questionForPending(pending) {
-  const prompts={
-    transaction_type:'دي فلوس بيع، ولا شراء، ولا مصروف؟', amount:'المبلغ كله كام؟', unit_price:'سعر الواحدة كام؟',
-    product_name:'اسم البضاعة إيه؟', quantity:'الكمية كام؟', unit:'الكمية بتتقاس بإيه؟',
-    date:'كان إمتى؟', amount_kind:'المبلغ ده كله ولا سعر الواحدة؟', due_date:'أفكرك يوم إيه؟', reminder_title:'أفكرك تعملي إيه؟',
-    markup_percent:'تحب تزود كام على التكلفة؟',
-  };
-  const question=prompts[pending.waiting_for]||'محتاج أعرف حاجة واحدة بس. إيه هي؟';
-  if(pending.waiting_for==='unit_price'&&pending.quantity&&pending.productName)return `${Number(pending.quantity).toLocaleString('ar-EG')} ${pending.unit||''} ${pending.productName} اتباعوا بكام كلهم؟`.replace(/\s+/gu,' ').trim();
-  return question;
-}
-
 function mergePendingTransaction(pending, parsed) {
   const next = { ...pending };
   // A short reply answers the exact slot we just requested. Keep that link
@@ -87,8 +75,10 @@ function transactionPending(parsed, existing, raw) {
 
   if (missing) {
     item.waiting_for = missing;
-    const question=String(parsed.question?.text||'').trim();
-    return { status: 'waiting_for_details', payload: item, reply: question.slice(0,300)||questionForPending(item) };
+    const proposed=parsed.question;
+    const question=proposed?.expected_field===missing?String(proposed.text||'').trim():'';
+    const wellFormed=question&&(question.match(/[؟?]/gu)||[]).length===1;
+    return { status: 'waiting_for_details', payload: item, reply: wellFormed?question:'محتاج أعرف معلومة واحدة كمان.' };
   }
   delete item.waiting_for;
   const product = item.productName ? ` ${[item.quantity, item.unit, item.productName].filter(value => value != null && value !== '').join(' ')}` : '';

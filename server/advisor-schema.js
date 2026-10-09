@@ -4,6 +4,8 @@ const text = (maxLength = 300) => ({ type: 'string', maxLength });
 const number = { type: ['number','null'] };
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required });
 const list = (items, maxItems = 12) => ({ type: 'array', items, maxItems });
+const question=object({text:text(300),fact_key:nullableText(80),reason:text(300),expected_field:{type:['string','null'],enum:['transaction_type','amount','unit_price','product_name','quantity','unit','date','amount_kind','due_date','reminder_title','markup_percent',null]}});
+question.required=['text','fact_key','reason'];
 const fact = object({
   key: text(80), label: text(100), value: text(300), numeric_value: number, unit: nullableText(40),
   kind: { type:'string', enum:['fact','resource','price','preference','constraint'] },
@@ -28,7 +30,7 @@ const properties = {
   project_reference: nullableText(100),
   state_update: { ...object({ mode:{type:'string',enum:['continue','interrupt','resume','replace']},
     objective:nullableText(300), capability:nullableText(80), next_action:nullableText(300), progress:nullableText(300) }), type:['object','null'] },
-  question: { ...object({ text:text(300), fact_key:nullableText(80), reason:text(300) }), type:['object','null'] },
+  question: { ...question, type:['object','null'] },
   calculations:list(calculation,5),
   research_requests:list(object({
     key:text(80), query:text(300), purpose:{type:'string',enum:['price','supplier','requirement','regulation','market']},

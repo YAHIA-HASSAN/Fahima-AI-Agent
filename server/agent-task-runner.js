@@ -2,7 +2,7 @@ const { createHash } = require('node:crypto');
 const { extract } = require('./agent');
 const marketResearch = require('./market-research');
 const { validateBusinessPlan } = require('./plan-validator');
-const { simplifyResponse } = require('./response-quality');
+const { createToolRegistry } = require('./tool-registry');
 
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function toolOutcome({tool,invocationId,input,output,error,projectId,at=new Date().toISOString()}) {
@@ -61,17 +61,33 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
   async function run(task,control) {
     const started=Date.now(),payload=task.payload||{},message=String(payload.message||''),projectId=task.projectId;
     const budget=task.budget||taskBudget(task.type,config);
+    const runtimeTools=createToolRegistry({projectId});
+    runtimeTools.register({name:'market_search',description:'Find and validate current external market information for this project.',
+      inputSchema:{type:'object',properties:{key:{type:'string',minLength:1,maxLength:80},query:{type:'string',minLength:1,maxLength:300},purpose:{type:'string',enum:['price','supplier','requirement','regulation','market']},product_name:{type:'string',maxLength:120},specification:{type:['string','null'],maxLength:200},unit:{type:['string','null'],maxLength:60},location:{type:['string','null'],maxLength:120},freshness_days:{type:'number',minimum:1,maximum:365},search_type:{type:'string',enum:['search','shopping']},reason:{type:'string',maxLength:300},source_url:{type:['string','null'],maxLength:1000}},required:['key','query','purpose','product_name','specification','unit','location','freshness_days','reason'],additionalProperties:false},
+      outputSchema:{type:'object'},execute:async(request)=>{
+        const normalize=value=>String(value||'').toLocaleLowerCase('ar-EG').replace(/[\s\u0640]/gu,'').trim();
+        const prior=advisor.memory.research(projectId,{freshOnly:true}).find(row=>row.research_key===request.key&&row.selected&&
+          (!request.product_name||normalize(row.product_name)===normalize(request.product_name))&&
+          (!request.specification||normalize(row.specification)===normalize(request.specification))&&
+          (!request.unit||normalize(row.normalized_unit||row.unit)===normalize(request.unit))&&
+          (!request.location||normalize(request.location)==='مصر'||normalize(row.location)===normalize(request.location)));
+        if(prior)return {cached:true,summary:'Using a matching fresh project-scoped research result.',items:[prior]};
+        const location=advisor.memory.facts(projectId).find(row=>row.key==='location')?.value||null;
+        const result=await searchMarket(request,{location,projectId});
+        result.items=advisor.memory.saveResearch(projectId,result);
+        return {cached:false,...result};
+      }});
     const baselineDecisions=Number(payload.baselineDecisionCount??(payload.parsed?1:0));
     const baselineInputTokens=Number(payload.baselineInputTokens)||0,baselineOutputTokens=Number(payload.baselineOutputTokens)||0;
     const persistedSteps=control.completedSteps?.()||[];
     const decisionSteps=persistedSteps.filter(step=>step.kind==='llm_decision'&&step.status==='completed').sort((a,b)=>a.sequence-b.sequence);
     const toolSteps=persistedSteps.filter(step=>['market_search','calculation'].includes(step.kind));
-    const outcomes=toolSteps.map(step=>({kind:step.kind,key:step.key,stepKey:step.key,
+    const outcomes=[...(payload.initialToolResults||[]),...toolSteps.map(step=>({kind:step.kind,key:step.key,stepKey:step.key,
       result:step.status==='completed'?step.result:toolOutcome({tool:step.kind==='market_search'?'market_search':'analyze_scenario',invocationId:step.key,
-        input:{key:step.key},error:{code:step.error||'TOOL_PREVIOUSLY_FAILED',message:'الأداة لم تكتمل في المحاولة السابقة.'},projectId})}));
+        input:{key:step.key},error:{code:step.error||'TOOL_PREVIOUSLY_FAILED',message:'Tool did not complete in the previous attempt.'},projectId})}))];
     let decisions=Math.max(Number(task.decisionCount)||0,baselineDecisions,...decisionSteps.map(step=>Math.ceil(step.sequence/100)));
-    let tools=Math.max(Number(task.toolCount)||0,toolSteps.length);
-    let parsed=payload.parsed||null;
+    let tools=Math.max(Number(task.toolCount)||0,toolSteps.length,payload.initialToolResults?.length||0);
+    let parsed=(payload.initialToolResults?.length?null:payload.parsed)||null;
     let currentDecisionSequence=baselineDecisions*100;
     const latestDecision=decisionSteps.at(-1);
     if(latestDecision){parsed=latestDecision.result?.decision||parsed;currentDecisionSequence=latestDecision.sequence;}
@@ -151,23 +167,15 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
       return context;
     }
     async function performSearch(request,sequence) {
-      const normalize=value=>String(value||'').toLocaleLowerCase('ar-EG').replace(/[\s\u0640]/gu,'').trim();
-      const prior=advisor.memory.research(projectId,{freshOnly:true}).find(row=>row.research_key===request.key&&row.selected&&
-        (!request.product_name||normalize(row.product_name)===normalize(request.product_name))&&
-        (!request.specification||normalize(row.specification)===normalize(request.specification))&&
-        (!request.unit||normalize(row.normalized_unit||row.unit)===normalize(request.unit))&&
-        (!request.location||normalize(request.location)==='مصر'||normalize(row.location)===normalize(request.location)));
       const requestSignature=hash({key:request.key,query:request.query,product_name:request.product_name,specification:request.specification,unit:request.unit,location:request.location}).slice(0,16);
       const stepKey=`search:${request.key}:${requestSignature}`;
       const existing=outcomes.find(row=>row.stepKey===stepKey);
       if(existing)return;
       const step=await control.runStep({key:stepKey,sequence,kind:'market_search',input:{key:request.key,query:request.query,location:request.location}},async()=>{
-        if(prior)return toolOutcome({tool:'market_search',invocationId:stepKey,input:request,output:{cached:true,items:[prior]},projectId});
         try {
-          const location=advisor.memory.facts(projectId).find(row=>row.key==='location')?.value||null;
-          const result=await searchMarket(request,{location,projectId});
-          result.items=advisor.memory.saveResearch(projectId,result);
-          return toolOutcome({tool:'market_search',invocationId:stepKey,input:request,output:{cached:false,...result},projectId});
+          const outcome=await runtimeTools.execute('market_search',request);
+          if(outcome.status!=='succeeded')throw Object.assign(new Error(outcome.error?.message||'تعذر تنفيذ بحث السوق.'),{code:outcome.error?.code||'MARKET_SEARCH_FAILED'});
+          return toolOutcome({tool:'market_search',invocationId:stepKey,input:request,output:outcome.output,projectId});
         } catch(error) {
           if(error?.code==='TASK_LEASE_LOST')throw error;
           const status=Number(error?.status||error?.statusCode||error?.response?.status||error?.cause?.status||0);
@@ -191,20 +199,18 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
       }
       let plan=processed?.plan||advisor.memory.latestPlan(projectId);
       if(plan&&validation){advisor.memory.setPlanValidation(projectId,plan.id,validation);plan=advisor.memory.latestPlan(projectId)||plan;}
-      const failedSearch=outcomes.find(item=>item.kind==='market_search'&&outcomeFailed(item.result));
-      const incompleteSearch=outcomes.find(item=>item.kind==='market_search'&&item.result?.status==='insufficient_data');
-      if(failedSearch&&status!=='FAILED')reply=[reply,'البحث ماكملش؛ ما استخدمتش سعر غير مؤكد في الحساب.'].filter(Boolean).join('\n');
-      else if(incompleteSearch)reply=[reply,'نتيجة البحث ماكانتش كفاية لتأكيد السعر أو المواصفات.'].filter(Boolean).join('\n');
+      const failedResearch=outcomes.some(item=>item.kind==='market_search'&&outcomeFailed(item.result));
+      if(failedResearch&&status!=='FAILED')reply='ماقدرتش أراجع أسعار موثوقة، فخليت الخطة مبدئية لحد ما نتأكد منها.';
       const taskSearchKeys=new Set(outcomes.filter(item=>item.kind==='market_search').map(item=>item.key));
       const researchRows=advisor.memory.research(projectId).filter(row=>row.selected||taskSearchKeys.has(row.research_key))
         .sort((a,b)=>Number(taskSearchKeys.has(b.research_key))-Number(taskSearchKeys.has(a.research_key))).slice(0,12);
       const groupedResearch=[...new Map(researchRows.map(row=>[row.research_key,row])).values()].map(row=>({request:{key:row.research_key},
         items:researchRows.filter(item=>item.research_key===row.research_key)}));
-      const requiresPlan=task.type==='business_plan'||/خطة|business plan/i.test(`${task.objective} ${message}`);
+      const requiresPlan=task.type==='business_plan';
       const effectiveStatus=validation?.taskStatus==='WAITING_FOR_INPUT'||validation?.status==='INVALID'||requiresPlan&&!plan&&status!=='FAILED'?'WAITING_FOR_INPUT':
         validation?.status==='PROVISIONAL'&&status==='COMPLETE'?'PROVISIONAL':(!plan&&status==='COMPLETE'?'WAITING_FOR_INPUT':status);
-      const userReply=simplifyResponse(String(reply||'').slice(0,4500));
-      const result={taskId:task.id,status:effectiveStatus,reply:userReply,speechText:simplifyResponse(userReply.split('\n')[0]),
+      const userReply=String(reply||'').trim();
+      const result={taskId:task.id,status:effectiveStatus,reply:userReply,speechText:userReply,
         plan:plan?{id:plan.id,projectId:Number(projectId),revision:plan.revision,title:plan.title,status:plan.status||validation?.status||'PROVISIONAL',stale:Boolean(plan.stale)}:null,
         planRef:plan?{planId:plan.id,projectId:Number(projectId),revision:plan.revision,status:plan.status||validation?.status||'PROVISIONAL'}:null,
         calculations:processed?.calculations||[],research:groupedResearch,
@@ -274,7 +280,12 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
           const saved=await control.runStep({key:stepKey,sequence:decisions*100+tools+1,kind:'calculation',input},async()=>toolOutcome({tool:'analyze_scenario',
             invocationId:calculation.id,input:calculation.request||input,output:calculation,projectId}));
           const execution=saved?.output?saved:toolOutcome({tool:'analyze_scenario',invocationId:calculation.id,input:calculation.request||input,output:saved,projectId});
-          processed.calculations[index]=execution.output;tools+=1;outcomes.push({kind:'calculation',key:calculation.id,stepKey,result:execution});
+          processed.calculations[index]=execution.output;tools+=1;
+          if(calculation.id)for(let priorIndex=outcomes.length-1;priorIndex>=0;priorIndex--) {
+            const prior=outcomes[priorIndex],priorOutput=prior?.result?.output||prior?.result?.result;
+            if(prior.kind==='calculation'&&priorOutput?.id===calculation.id)outcomes.splice(priorIndex,1);
+          }
+          outcomes.push({kind:'calculation',key:calculation.id,stepKey,result:execution});
           control.metric('tool_execution',execution.status==='succeeded'?1:0,{kind:'calculation',type:calculation.type,status:execution.status});
         }
         updateCounts({progress:processed.plan?'حسبت المدخلات المتاحة وراجعت مسودة الخطة.':'حللت المعلومات المتاحة وحددت الخطوة التالية.'});
@@ -300,27 +311,19 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
           const scenario=calculationOutcomes.some(item=>item?.output?.scenario);
           const status=missing.length?'WAITING_FOR_INPUT':warnings.length||scenario?'PROVISIONAL':'COMPLETE';
           const validation={status,qualityStatus:status,valid:status==='COMPLETE',missing,warnings:[...new Set(warnings)],errors:[]};
-          const sources=advisor.memory.research(projectId,{freshOnly:true}).filter(row=>row.selected&&row.price!=null)
-            .map(row=>`سعر ${row.product_name}: ${row.price} ${row.currency||'جنيه'} / ${row.normalized_unit||row.unit}، من ${row.source_title} بتاريخ ${row.observed_on}.`).slice(0,4);
-          const reply=[processed.reply,...sources,missing.length?'الحساب محتاج معلومة ناقصة قبل ما أطلع نتيجة موثوقة.':null,
-            warnings.length?'البحث ما أكدش كل المعلومات المطلوبة.':null,processed.question?.text].filter(Boolean).join('\n');
-          return finishWith(status,reply,processed,validation);
+          return finishWith(status,processed.reply,processed,validation);
         }
         const validation=validateBusinessPlan(currentPlan,{objective:task.objective,projectFacts:advisor.memory.facts(projectId),
           calculations:outcomes.filter(item=>item.kind==='calculation').map(item=>item.result),research:advisor.memory.research(projectId),authoritativeToolResults:outcomes,
           requiredDeliverables:{financialAnalysis:task.type==='business_plan'}});
         if(currentPlan&&validation.status==='COMPLETE') {
-          const sources=advisor.memory.research(projectId,{freshOnly:true}).filter(row=>row.selected&&row.price!=null)
-            .map(row=>`سعر ${row.product_name}: ${row.price} ${row.currency||'جنيه'} / ${row.normalized_unit||row.unit}، من ${row.source_title} بتاريخ ${row.observed_on}.`).slice(0,4);
-          const reply=[currentPlan.body.summary,...(processed.calculations||[]).map(row=>row.display).filter(Boolean),...sources,...(processed.question?[processed.question.text]:[])].filter(Boolean).join('\n');
+          const reply=processed.reply||currentPlan.body.summary;
           const status=processed.question?'PROVISIONAL':'COMPLETE';
           return finishWith(status,reply,processed,{...validation,status});
         }
         if(processed.question&&!currentPlan)return finishWith('WAITING_FOR_INPUT',processed.reply,processed,{...validation,status:'PROVISIONAL',taskStatus:'WAITING_FOR_INPUT'});
         if(round>=rounds-1) {
-          const reply=currentPlan
-            ?[currentPlan.body.summary,...(processed.calculations||[]).map(row=>row.display).filter(Boolean),`الخطة مبدئية؛ محتاجة مراجعة: ${validation.missing.slice(0,4).join('، ')||'فيه افتراضات لسه محتاجة تأكيد'}.`].join('\n')
-            :processed.reply;
+          const reply=processed.reply||(currentPlan?currentPlan.body.summary:'');
           const safeStatus=validation.status==='INVALID'||validation.taskStatus==='WAITING_FOR_INPUT'?'WAITING_FOR_INPUT':currentPlan?'PROVISIONAL':'WAITING_FOR_INPUT';
           return finishWith(safeStatus,reply,processed,validation);
         }

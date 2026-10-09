@@ -9,7 +9,19 @@ const labels = {
 const profileFields = new Set(['capital','activity','products','costs','sales_method','household_use']);
 const financialKeys = new Set(['capital','starting_capital','available_cash','opening_cash','total_invested','obligations']);
 function factLabel(row) { return labels[row.key] || row.label || 'معلومة عن المشروع'; }
-function createMemory(db) {
+function createMemory(db,business=null) {
+  function reasoningContext({conversation,project,currentMessage='',pending=null,recentMessageLimit=16}={}) {
+    if(!conversation?.id||!project?.id||Number(conversation.project_id)!==Number(project.id))throw new Error('Memory context requires a conversation and project from the same scope.');
+    const all=db.prepare('SELECT id,role,content,input_type FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?').all(conversation.id,recentMessageLimit+1).reverse();
+    const history=all.slice(0,-1);
+    const factsForProject=facts(project.id).slice(0,40);
+    const products=business?.getProducts?business.getProducts(project.id).slice(0,20):[];
+    const recentTransactions=db.prepare(`SELECT t.type,t.amount,t.date,t.description,i.quantity,i.unit,i.unit_price,p.name AS product_name
+      FROM transactions t LEFT JOIN transaction_items i ON i.transaction_id=t.id LEFT JOIN products p ON p.id=i.product_id
+      WHERE t.project_id=? AND t.voided_at IS NULL ORDER BY t.id DESC LIMIT 12`).all(project.id);
+    return {history,summary:conversation.summary||'',facts:factsForProject,products:products.map(row=>({name:row.name,unit:row.unit,current_quantity:row.current_quantity,unit_cost:row.unit_cost,markup_percent:row.markup_percent})),
+      recentTransactions,pending,profile:{name:project.name,activity:project.activity,products:project.products,capital:project.capital,costs:project.costs,sales_method:project.sales_method,household_use:project.household_use},currentMessage:String(currentMessage||'')};
+  }
   function facts(projectId) {
     const seen=new Set();
     return db.prepare('SELECT * FROM project_facts WHERE project_id=? ORDER BY updated_at DESC,id DESC').all(projectId)
@@ -155,6 +167,6 @@ function createMemory(db) {
     db.prepare('UPDATE business_plans SET status=?,body=? WHERE id=? AND project_id=?').run(status,JSON.stringify(body),planId,projectId);
     return true;
   }
-  return {facts,state,goals,latestPlan,experience,stalePlans,research,researchFacts,saveResearch,applyFacts,applyGoals,saveState,savePlan,setPlanValidation};
+  return {facts,state,goals,latestPlan,experience,stalePlans,research,researchFacts,saveResearch,applyFacts,applyGoals,saveState,savePlan,setPlanValidation,reasoningContext};
 }
 module.exports = {createMemory,factLabel,labels};

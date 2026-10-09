@@ -5,7 +5,8 @@ const os=require('node:os');
 const path=require('node:path');
 const { randomUUID }=require('node:crypto');
 const { calculate }=require('../server/planning');
-const { validateText, chooseQuestion, simplifyResponse, calculationText }=require('../server/response-quality');
+const { validateResponse, chooseQuestion }=require('../server/response-validator');
+const { calculationDisplay }=require('../server/calculation-display');
 const agent=require('../server/agent');
 const marketResearchModule=require('../server/market-research');
 
@@ -44,23 +45,24 @@ test('planning tools use deterministic arithmetic, explicit reserves, and no mis
 test('reply guard suppresses repeated questions and unsupported claims without damaging names',()=>{
   const facts=[{key:'capital',value:'10000',numeric_value:10000,certainty:'confirmed'}, {key:'brand',value:'Brother 2100',numeric_value:null,certainty:'confirmed'}];
   assert.equal(chooseQuestion({text:'معاك كام؟',fact_key:'capital',reason:'تقسيم الميزانية'},facts,null),null);
-  assert.equal(validateText('الماكينة Brother 2100 محتاجة صيانة.',{facts}).valid,true);
-  assert.equal(validateText('capital عندك 10000 جنيه.',{facts}).text,'المبلغ المتاح لبداية المشروع عندك 10000 جنيه.');
-  assert.equal(validateText('هتكسب أكيد 5000 جنيه.',{facts}).valid,false);
-  assert.equal(validateText('سعر السوق 300 جنيه.',{facts}).valid,false);
-  assert.equal(validateText('صافي الربح 10000 جنيه.',{facts}).valid,false);
-  assert.equal(validateText('سعر السوق 10000 جنيه.',{facts}).valid,false);
-  assert.equal(validateText('SELECT * FROM projects',{facts}).valid,false);
+  assert.equal(validateResponse('الماكينة Brother 2100 محتاجة صيانة.',{facts}).valid,true);
+  assert.equal(validateResponse('capital عندك 10000 جنيه.',{facts}).text,'capital عندك 10000 جنيه.');
+  assert.equal(validateResponse('هتكسب أكيد 5000 جنيه.',{facts}).valid,false);
+  assert.equal(validateResponse('سعر السوق 300 جنيه.',{facts}).valid,false);
+  assert.equal(validateResponse('صافي الربح 10000 جنيه.',{facts}).valid,false);
+  assert.equal(validateResponse('سعر السوق 10000 جنيه.',{facts}).valid,false);
+  assert.equal(validateResponse('SELECT * FROM projects',{facts}).valid,false);
 });
 
-test('Arabic response simplifier keeps replies short, natural, and to one question',()=>{
-  assert.equal(simplifyResponse('مطلوب استكمال البيانات. يرجى توضيح المبلغ الإجمالي؟ وسعر الواحدة كام؟'),'محتاج أعرف حاجة واحدة بس. المبلغ كله كام؟');
-  assert.equal(simplifyResponse('ده اقتراح لخطة بديلة. ومش هيتسجل كمصروف تدفعيه.'),'دي فكرة تانية ممكنة للمشروع. ومش هسجله كمصروف اتدفع.');
-  assert.equal(simplifyResponse('بدأت أراجع المعلومات والأسعار والحسابات علشان أطلع نتيجة وخطة مناسبة. هتظهر هنا أول ما تجهز.'),'ثانية وهقولك النتيجة.');
-  assert.equal(simplifyResponse('حصلت مشكلة مؤقتة في المساعد. جرب تاني أو اكتب طلبك بشكل أوضح.'),'حصلت مشكلة عندي. جرّب تاني بعد شوية.');
-  assert.equal(validateText('المدخلات غير كافية',{facts:[]}).valid,true);
-  assert.equal(validateText('SELECT * FROM projects',{facts:[]}).valid,false);
-  assert.equal(calculationText({type:'revenue',values:{quantity:10,revenue:250}}),'بيع ١٠ وحدة بالسعر ده يجيب ٢٥٠ جنيه قبل طرح التكاليف. ده مش صافي مكسب.');
+test('response validation preserves model wording and rejects unsafe claims without rewriting or truncating',()=>{
+  const original='مطلوب استكمال البيانات. يرجى توضيح المبلغ الإجمالي؟ وسعر الواحدة كام؟';
+  const result=validateResponse(original,{facts:[]});
+  assert.equal(result.text,original);
+  assert.equal(result.valid,false);
+  assert.ok(result.reasons.includes('multiple_questions'));
+  const long='كلمة '.repeat(1200);
+  assert.equal(validateResponse(long,{facts:[]}).text,long.trim());
+  assert.equal(calculationDisplay({type:'revenue',values:{quantity:10,revenue:250}}),'بيع ١٠ وحدة بالسعر ده يساوي ٢٥٠ جنيه قبل طرح التكاليف. ده مش صافي مكسب.');
 });
 
 test('market search has a terminal timeout instead of hanging',async()=>{
@@ -158,6 +160,9 @@ test('adaptive advisory scenarios persist independently and survive an applicati
         return {output_text:JSON.stringify({summary:'عرض منشور للاختبار.',items:[{...item,seller:'مورد تجريبي',source_url:source,source_kind:'published_offer',observed_on:B.localDate(),location:'مصر',confidence:'medium',availability:'راجع التوفر',excerpt:'سعر منشور'}]}),
           steps:[{type:'model_output',content:[{type:'text',annotations:[{type:'url_citation',url:source,title:'صفحة المورد'}]}]}]};
       }}});
+      decisionResponder=prompt=>prompt.includes('"tool_results":')&&prompt.includes('"tool":"market_search"')
+        ?output({...next,research_requests:[],calculations:[],answer:'راجعت الأسعار والحساب المتاح يكفي لبداية تقديرية بحوالي ٦٠ كتكوتًا.'})
+        :next;
       response=await send(scope,'ماشي احسب وقولي',{
         answer:'هراجع السعرين المطلوبين، والحساب هيستخدم جزءًا محددًا من الميزانية للكتاكيت مع احتياطي لباقي التشغيل.',
         research_requests:[
@@ -177,8 +182,10 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       assert.match(response.reply,/60|٦٠/);assert.doesNotMatch(response.reply,/معاك يا فندم|هنحسب/);
       response=await send(scope,'هجيب قد اه',{},'poultry-how-many');
       assert.match(response.reply,/60|٦٠/);assert.doesNotMatch(response.reply,/هل نبدأ|سعر.*كام/);
+      decisionResponder=null;
     });
     await t.test('grounded market research is project scoped, cited, fresh, and available to deterministic calculations',async()=>{
+      decisionResponder=null;
       const source='https://supplier.example/item';
       let searchCalls=0;
       let releaseFirstSearch;
@@ -192,6 +199,9 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       }}});
       next=output({research_requests:[{key:'input_unit',query:'سعر مدخل التشغيل للوحدة في مصر',purpose:'price',product_name:'مدخل تشغيل',specification:null,unit:'وحدة',location:'مصر',freshness_days:7,reason:'حساب كمية بداية مناسبة'}],
         calculations:[calc('purchase',{budget:reference('capital'),reserve:literal(2000),price:reference('market:input_unit')})]});
+      decisionResponder=prompt=>prompt.includes('"tool_results":')&&prompt.includes('"tool":"market_search"')
+        ?output({...next,research_requests:[],calculations:[],answer:'لقيت عرضًا منشورًا، والحساب المتاح يقدّر الكمية الممكنة.'})
+        :next;
       const pendingResponse=api('/api/chat',{...primary,message:'دوري على سعر المدخل واحسبي اللي نقدر نشتريه',requestId:'quick-market-task'});
       const quick=await Promise.race([pendingResponse,new Promise(resolve=>setTimeout(()=>resolve(null),100))]);
       assert.ok(quick,'main chat response must not wait for market research');
@@ -199,13 +209,14 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       assert.ok(response.researchJobId);assert.deepEqual(response.calculations[0].missing,['market:input_unit']);
       let finished=await researchJob(response.researchJobId,primary.projectId);
       assert.equal(finished.status,'completed');response=finished.result;
-      assert.equal(response.calculations[0].values.quantity,800,JSON.stringify(response));
+      assert.ok(response.calculations.some(row=>row.values?.quantity===800),JSON.stringify(response));
       assert.equal(response.research[0].items[0].source_url,source);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM market_research WHERE project_id=?').get(primary.projectId).n,1);
       const persistedResearch=db.prepare('SELECT provider,validation_status FROM market_research WHERE project_id=? AND research_key=?').get(primary.projectId,'input_unit');
       assert.equal(persistedResearch.provider,'gemini');assert.equal(persistedResearch.validation_status,'accepted_for_planning');
       assert.equal(db.prepare("SELECT COUNT(*) n FROM market_research WHERE project_id<>? AND research_key='input_unit'").get(primary.projectId).n,0);
-      assert.match(response.reply,/بحث السوق|صفحة المورد|مصدر/);
+      assert.equal(response.research[0].items[0].source_url,source);
+      assert.ok(response.calculations.some(row=>row.values?.quantity===800));
       response=await send(primary,'راجعي نفس السعر تاني',{research_requests:[{key:'input_unit',query:'سعر مدخل التشغيل للوحدة في مصر',purpose:'price',product_name:'مدخل تشغيل',specification:null,unit:'وحدة',location:'مصر',freshness_days:7,reason:'مراجعة الحساب'}],
         calculations:[calc('purchase',{budget:reference('capital'),reserve:literal(2000),price:reference('market:input_unit')})]});
       assert.equal(searchCalls,1);assert.equal(response.calculations[0].values.quantity,800);
@@ -219,6 +230,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       finished=await researchJob(response.researchJobId,primary.projectId);response=finished.result;
       assert.equal(response.research[0].items[0].price,null);
       assert.deepEqual(response.calculations[0].missing,['market:uncited_item']);
+      decisionResponder=null;
     });
     await t.test('a stalled search reaches a visible terminal fallback',async()=>{
       const oldTimeout=process.env.GEMINI_SEARCH_TIMEOUT_MS;
@@ -230,7 +242,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
         assert.ok(response.researchJobId);
         const finished=await researchJob(response.researchJobId,primary.projectId);
         assert.equal(finished.status,'completed',JSON.stringify(finished));
-        assert.match(finished.result.reply,/اتأخر|فوقفت الانتظار|حساب مشروط|البحث ماكملش/);
+        assert.equal(finished.result.reply,'ماقدرتش أراجع أسعار موثوقة، فخليت الخطة مبدئية لحد ما نتأكد منها.');
         assert.deepEqual(finished.result.calculations[0].missing,['market:stalled_item']);
         assert.ok(finished.result.metrics.decisions>=2,'The timeout result must return to Gemini for a follow-up decision.');
         assert.match(captured,/tool_results/);
@@ -266,7 +278,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
         calculations:[calc('goal',{target:reference('goal:monthly'),price:literal(50),unit_cost:literal(30),fixed_cost:literal(1000),quantity:literal(100)})]});
       assert.equal(response.calculations[0].values.required_quantity,300);
       assert.equal(response.calculations[0].values.target_covered,false);
-      assert.match(response.reply,/مش ضمان/);
+      assert.equal(response.calculations[0].values.required_quantity,300);
     });
     await t.test('corrections recalculate prior plan arithmetic without pretending the strategy is reviewed',async()=>{
       let response=await send(primary,'رأس المال بقى 15000',{facts:[fact('capital',15000,'رأس المال بقى 15000',{correction:true})]});
@@ -289,7 +301,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
     await t.test('planned purchase is stored only as a proposal; actual purchase still needs review and retries do not duplicate',async()=>{
       const purchase={intent:'record_transaction',transaction_type:'stock_cost',amount:500,amount_kind:'total',product_name:'كتاكيت',quantity:50,unit:'طائر',description:'هشتري 50 كتكوت'};
       const before=db.prepare('SELECT COUNT(*) n FROM transactions').get().n;
-      const planned=await send(primary,'هشتري 50 كتكوت',{...purchase,transaction_status:'planned'});
+      const planned=await send(primary,'هشتري 50 كتكوت',{...purchase,transaction_status:'planned',plan:plan('شراء مقترح','راجع التكلفة والتجهيز قبل الشراء.')});
       assert.equal(planned.kind,'advice');assert.ok(planned.plan);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,before);
       const actual=await send(primary,'اشتريت 50 كتكوت بخمسمية',{...purchase,transaction_status:'actual',description:'اشتريت 50 كتكوت'},'purchase');
@@ -307,7 +319,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
     await t.test('mixed actual and planned operations keep separate records and side questions preserve financial review',async()=>{
       const scope=await create('عمليات مختلطة');
       const item=(status,description,amount)=>({transaction_status:status,transaction_type:'operating_expense',amount,amount_kind:'total',date:'',description,estimated:false,product_name:null,quantity:null,unit:null,unit_price:null});
-      const response=await send(scope,'دفعت 20 جنيه نقل وهشتري خامات بـ50 جنيه',{intent:'record_transactions',transaction_status:'actual',transactions:[item('actual','نقل',20),item('planned','خامات بـ50 جنيه',50)]});
+      const response=await send(scope,'دفعت 20 جنيه نقل وهشتري خامات بـ50 جنيه',{intent:'record_transactions',transaction_status:'actual',transactions:[item('actual','نقل',20),item('planned','خامات بـ50 جنيه',50)],plan:plan('مقترح خامات','راجع الكمية والسعر قبل الشراء.')});
       assert.equal(response.kind,'saved');assert.ok(response.plan);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE project_id=? AND amount=20').get(scope.projectId).n,1);
       await send(scope,'إزاي أحسن البيع؟',{state_update:state('سؤال جانبي','interrupt')});

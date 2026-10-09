@@ -138,7 +138,7 @@ test('failed research and missing reserve leave a provisional plan while task wa
   assert.equal(done.result.plan.status,'PROVISIONAL');
   assert.equal(done.result.validation.taskStatus,'WAITING_FOR_INPUT');
   assert.ok(done.result.validation.missing.some(value=>value.includes('reserve')));
-  assert.ok(done.result.reply.includes('ما استخدمتش سعر غير مؤكد'));
+  assert.equal(done.result.reply,'ماقدرتش أراجع أسعار موثوقة، فخليت الخطة مبدئية لحد ما نتأكد منها.');
   assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE project_id=1').get().n,0);
   assert.equal(manager.steps(task.id,1).filter(step=>step.kind==='market_search').length,2);
   await manager.close();db.close();

@@ -5,6 +5,7 @@ const path = require('node:path');
 const { loadConfig } = require('../server/config');
 const agent = require('../server/agent');
 const { createBusinessTools, executeBusinessTool } = require('../server/business-tools');
+const { createToolRegistry } = require('../server/tool-registry');
 
 test('model and timeouts are configurable without local Gemini quotas', () => {
   const config = loadConfig({ GEMINI_MODEL: 'custom-model', GEMINI_TIMEOUT_MS: '25000', GEMINI_TTS_TIMEOUT_MS:'7000', GEMINI_SEARCH_TIMEOUT_MS:'11000' });
@@ -26,6 +27,17 @@ test('conversation summaries compact locally without another Gemini generation',
   assert.match(summary, /مشروع دواجن/);
   assert.equal(calls, 0);
   agent.__setGeminiClientForTests(null);
+});
+
+test('final response reasoning receives the actual structured tool observation',async()=>{
+  const oldKey=process.env.GEMINI_API_KEY;process.env.GEMINI_API_KEY='test-key';let prompt='';
+  agent.__setGeminiClientForTests({interactions:{async create(request){prompt=request.input;return {output_text:JSON.stringify({answer:'تمام، سجلت بيع ١٠ بيضات بـ٥٠ جنيه.'})};}}});
+  try {
+    const answer=await agent.respondAfterTool({message:'بعت ١٠ بيضات، البيضة بخمسة',decision:{intent:'record_transaction'},
+      observation:{transaction:{type:'income',amount:50,quantity:10,unit_price:5}},context:{facts:[{key:'activity',value:'بيع بيض'}]}});
+    assert.equal(answer,'تمام، سجلت بيع ١٠ بيضات بـ٥٠ جنيه.');
+    assert.match(prompt,/"amount":50/u);assert.match(prompt,/"quantity":10/u);assert.match(prompt,/طلب المستخدم/u);
+  } finally {agent.__setGeminiClientForTests(null);if(oldKey===undefined)delete process.env.GEMINI_API_KEY;else process.env.GEMINI_API_KEY=oldKey;}
 });
 
 test('provider failures surface immediately without fabricated financial fallback', async () => {
@@ -65,14 +77,26 @@ test('business tool registry validates operations and binds data access to serve
     getProductSales: (id, from, to) => { calls.push(['productSales', id, from, to]); return [{ name: 'مياه', quantity: 3 }]; },
   };
   const tools = createBusinessTools(7, { business: fakeBusiness });
-  assert.deepEqual(executeBusinessTool(tools, 'get_sales_summary', { period: 'today', projectId: 99 }), { total: 150, count: 2, period: { from: 'today-from', to: 'today-to' } });
+  assert.deepEqual(executeBusinessTool(tools, 'get_sales_summary', { period: 'today' }), { total: 150, count: 2, period: { from: 'today-from', to: 'today-to' } });
   assert.deepEqual(calls[0], ['transactions', 7, 'today-from', 'today-to']);
-  assert.equal(executeBusinessTool(tools, 'get_inventory', { product_name: 'مياه', projectId: 99 }).product.name, 'مياه');
+  assert.equal(executeBusinessTool(tools, 'get_inventory', { product_name: 'مياه' }).product.name, 'مياه');
   assert.deepEqual(calls[1], ['products', 7]);
+  assert.throws(() => executeBusinessTool(tools, 'get_inventory', { projectId: 99 }), /not allowed/);
   assert.deepEqual(calls[2], ['find', 7, 'مياه']);
-  assert.equal(executeBusinessTool(tools, 'estimate_price', { cost: 100, markup_percent: 25, projectId: 99 }).price, 125);
+  assert.equal(executeBusinessTool(tools, 'estimate_price', { cost: 100, markup_percent: 25 }).price, 125);
   assert.throws(() => executeBusinessTool(tools, 'delete_all_data', {}), /unavailable/);
-  assert.throws(() => executeBusinessTool(tools, 'estimate_price', { cost: -1, markup_percent: 20 }), /invalid/);
+  assert.throws(() => executeBusinessTool(tools, 'estimate_price', { cost: -1, markup_percent: 20 }), /invalid|outside/);
+});
+
+test('unified tool registry publishes schemas and returns structured, project-scoped outcomes',()=>{
+  const registry=createToolRegistry({projectId:12});let executedScope=null;
+  registry.register({name:'lookup_value',description:'Read a project value.',inputSchema:{type:'object',properties:{key:{type:'string',minLength:1,maxLength:20}},required:['key'],additionalProperties:false},outputSchema:{type:'object',properties:{key:{type:'string'},value:{type:'string'}},required:['key','value']},
+    authorize:({projectId})=>projectId===12,execute:({key},{projectId})=>{executedScope=projectId;return {key,value:'stored'};}});
+  assert.deepEqual(registry.describe().map(row=>row.name),['lookup_value']);
+  assert.deepEqual(registry.execute('lookup_value',{key:'capital'}),{tool:'lookup_value',status:'succeeded',output:{key:'capital',value:'stored'}});
+  assert.equal(executedScope,12);
+  assert.equal(registry.execute('lookup_value',{key:'capital',projectId:99}).status,'failed');
+  assert.equal(registry.execute('unsafe_sql',{query:'DELETE'}).status,'rejected');
 });
 
 test('browser speech input is text-only and Gemini output streams without system speech', async () => {

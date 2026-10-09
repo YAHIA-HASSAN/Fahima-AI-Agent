@@ -3,23 +3,21 @@ const path = require('node:path');
 const express = require('express');
 const { loadConfig } = require('./config');
 const db = require('./db');
-const { extract, summarizeConversation, isOutOfDomain } = require('./agent');
+const { extract, respondAfterTool, summarizeConversation, isOutOfDomain } = require('./agent');
 const B = require('./business');
 const { TYPES, validDate } = require('./finance');
 const { createBusinessTools, executeBusinessTool } = require('./business-tools');
 const { randomUUID, createHash } = require('node:crypto');
 const { createGeminiClient } = require('./gemini-client');
 const { createAdvisor } = require('./advisor');
-const { simplifyResponse } = require('./response-quality');
+const { validateResponse } = require('./response-validator');
 const { withDeadline } = require('./deadline');
-const { createResearchJobs } = require('./research-jobs');
 const { createAgentTasks } = require('./agent-tasks');
-const { createTaskRunner,taskBudget,projectFingerprint } = require('./agent-task-runner');
+const { createTaskRunner,taskBudget,projectFingerprint,toolOutcome } = require('./agent-task-runner');
 const { diagnostic } = require('./diagnostics');
 const { createBusinessRoutes } = require('./routes/business');
 const { parsePeriod, periodLabel, transactionKindLabel, transactionPending, transactionBatchPending } = require('./transaction-flow');
 const advisor = createAdvisor(db,B);
-const researchJobs = createResearchJobs(db);
 
 const config = loadConfig();
 if (config.issues.length) console.warn('Configuration values need attention:', config.issues.join(' '));
@@ -93,20 +91,8 @@ function scheduleSummary(conversation) {
   setImmediate(()=>void maybeSummarize(conversation).catch(error=>console.error('Conversation summary failed:',error?.message||'Error')));
 }
 function currentContext(conversation,project,currentMessage='') {
-  const contextConfig = config.agent;
-  const all=db.prepare('SELECT id,role,content,input_type FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?').all(conversation.id,contextConfig.recentMessageLimit+1).reverse();
-  const history=all.slice(0,-1);
-  const relevantTerms = String(currentMessage || history.at(-1)?.content || '').toLocaleLowerCase();
-  const allFacts=db.prepare('SELECT key,value FROM project_facts WHERE project_id=? AND confirmed=1 ORDER BY updated_at DESC LIMIT 80').all(project.id);
-  const matchingFacts=allFacts.filter(f=>!relevantTerms||`${f.key} ${f.value}`.toLocaleLowerCase().split(/\s+/).some(term=>term.length>2&&relevantTerms.includes(term)));
-  const facts=(matchingFacts.length?matchingFacts:allFacts).slice(0,12);
-  const products=B.getProducts(project.id)
-    .sort((a,b)=>Number(relevantTerms.includes(b.name.toLocaleLowerCase()))-Number(relevantTerms.includes(a.name.toLocaleLowerCase())))
-    .slice(0,20).map(p=>({name:p.name,unit:p.unit,current_quantity:p.current_quantity,unit_cost:p.unit_cost,markup_percent:p.markup_percent}));
-  const recentTransactions=db.prepare(`SELECT t.type,t.amount,t.date,t.description,i.quantity,i.unit,i.unit_price,p.name AS product_name
-    FROM transactions t LEFT JOIN transaction_items i ON i.transaction_id=t.id LEFT JOIN products p ON p.id=i.product_id
-    WHERE t.project_id=? AND t.voided_at IS NULL ORDER BY t.id DESC LIMIT 12`).all(project.id);
-  return {advisor:advisor.context(project.id),availableProjects:db.prepare('SELECT name FROM projects ORDER BY id').all(),history,summary:conversation.summary||'',facts,products,pending:pendingFor(conversation.id),recentTransactions,profile:{name:project.name,activity:project.activity,products:project.products,capital:project.capital,costs:project.costs,sales_method:project.sales_method,household_use:project.household_use}};
+  const memoryContext=advisor.memory.reasoningContext({conversation,project,currentMessage,pending:pendingFor(conversation.id),recentMessageLimit:config.agent.recentMessageLimit});
+  return {...memoryContext,advisor:advisor.context(project.id),availableProjects:db.prepare('SELECT name FROM projects ORDER BY id').all()};
 }
 
 function findTransactionTarget(projectId, parsed) {
@@ -253,22 +239,7 @@ app.get('/api/research-jobs/:id/events',(req,res)=>{
     send(task);const unsubscribe=agentTasks.subscribe(task.id,project.id,value=>{if(!['QUEUED','RUNNING'].includes(value.status)){unsubscribe();finish(value);}else send(value);});
     req.on('close',unsubscribe);return;
   }
-  const job=researchJobs.get(req.params.id,project.id);
-  if(!job)return res.status(404).json({error:'متابعة البحث دي انتهت أو مش موجودة في المشروع.'});
-  res.set({'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache, no-transform','Connection':'keep-alive'});
-  res.flushHeaders();
-  const addAudio=value=>value?.status==='completed'&&value.result?.reply
-    ?{...value,result:withSpeechStream(value.result)}:value;
-  const send=value=>res.write(`data: ${JSON.stringify(addAudio(value))}\n\n`);
-  const finish=value=>{send(value);res.end();};
-  const initial=researchJobs.snapshot(job);
-  if(['completed','failed'].includes(initial.status))return finish(initial);
-  send(initial);
-  const unsubscribe=researchJobs.subscribe(job,value=>{
-    if(['completed','failed'].includes(value.status)){unsubscribe();finish(value);}
-    else send(value);
-  });
-  req.on('close',unsubscribe);
+  return res.status(404).json({error:'البحث مش موجود في المشروع ده.'});
 });
 
 app.get('/api/research-jobs/:id',(req,res)=>{
@@ -278,11 +249,7 @@ app.get('/api/research-jobs/:id',(req,res)=>{
     const status=task.status==='QUEUED'?'queued':task.status==='RUNNING'?'running':task.status==='CANCELLED'?'failed':task.status==='FAILED'&&!task.result?.reply?'failed':'completed';
     return res.json({id:task.id,status,result:task.result,error:task.error,updatedAt:task.updatedAt});
   }
-  const job=researchJobs.get(req.params.id,project.id);
-  if(!job)return res.status(404).json({error:'متابعة البحث دي انتهت أو مش موجودة في المشروع.'});
-  const value=researchJobs.snapshot(job);
-  if(value.status==='completed'&&value.result?.reply)value.result=withSpeechStream(value.result);
-  res.json(value);
+  return res.status(404).json({error:'البحث مش موجود في المشروع ده.'});
 });
 
 app.post('/api/tts/ticket',(req,res)=>{
@@ -376,17 +343,6 @@ app.post('/api/chat',async(req,res)=>{
         research:update.result?.research||[],calculations:update.result?.calculations||[],agentTaskId:['queued','running'].includes(status)?update.id:null,
         researchJobId:['queued','running'].includes(status)?update.id:null,conversationId:conversation.id,inputType});
     }
-    const latest=researchJobs.latest(project.id,conversation.id);
-    if(latest) {
-      const update=researchJobs.snapshot(latest);
-      const reply=update.status==='completed'&&update.result?.reply?update.result.reply
-        :update.status==='failed'?update.error
-          :'البحث شغال فعلًا ولسه جوه المهلة. النتيجة هتظهر في المحادثة، ولو البحث فشل هقولك السبب والبديل بوضوح.';
-      addAssistant(conversation.id,reply);
-      return res.json({kind:update.status==='completed'?'advice':'answer',reply,
-        speechText:update.result?.speechText||reply,research:update.result?.research||[],calculations:update.result?.calculations||[],
-        researchJobId:['queued','running'].includes(update.status)?update.id:null,conversationId:conversation.id,inputType});
-    }
   }
   if(active?.status==='awaiting_confirmation'&&affirmative){
     if(active.payload.needsReview) {
@@ -403,7 +359,16 @@ app.post('/api/chat',async(req,res)=>{
   }
   async function recordValidatedTransactions(actionType, payload, pendingId = null) {
     const outcome=await commitPending(project,conversation,{action_type:actionType,status:'ready',payload});
-    const reply=outcome.reply;
+    let reply=outcome.reply;
+    try {
+      const observation={kind:'saved',transactions:(outcome.transactions||[outcome.transaction].filter(Boolean)).map(row=>({type:row.type,amount:row.amount,date:row.date,description:row.description}))};
+      const finalText=await respondAfterTool({message:text,decision:parsed,observation,context:{project:advisor.context(project.id),history:context.history.slice(-8)}});
+      const checked=validateResponse(finalText,{facts:advisor.memory.facts(project.id),calculations:[{values:observation}],allowQuestion:false});
+      if(checked.valid)reply=checked.text;
+      else diagnostic('agent.final_response.rejected',{requestId,projectId:project.id,reasons:checked.reasons});
+    } catch(error) {
+      diagnostic('agent.final_response.failed',{requestId,projectId:project.id,code:error?.code||error?.name||'FINAL_RESPONSE_FAILED'});
+    }
     addAssistant(conversation.id,reply);scheduleSummary(conversation);
     return res.json({kind:'saved',reply,transaction:outcome.transaction,transactions:outcome.transactions,
       plan:advice?.plan||null,calculations:advice?.calculations||[],research:advice?.research||[],factsChanged:advice?.factsChanged||[],
@@ -437,7 +402,6 @@ app.post('/api/chat',async(req,res)=>{
   if(parsed.transactions?.some(item=>item.transaction_status)) {
     const proposed=parsed.transactions.filter(item=>item.transaction_status==='planned');
     parsed.planned_transactions=proposed;
-    if(proposed.length&&!parsed.plan)parsed.plan={title:'خطوات مقترحة للمشروع',summary:'دي خطوات لسه ما اتنفذتش.',requirements:[],assumptions:[],risks:[],indicators:[],next_action:'مراجعة المتطلبات قبل التنفيذ.',steps:proposed.map((item,i)=>({key:'planned_'+i,text:item.description||'خطوة مقترحة للمشروع',status:'proposed',evidence:null}))};
     const completed=parsed.transactions.filter(item=>(item.transaction_status||parsed.transaction_status)==='actual');
     parsed.transactions=completed;
     parsed.transaction_status=completed.length?'actual':'planned';
@@ -557,23 +521,41 @@ app.post('/api/chat',async(req,res)=>{
 
     }
   }catch(e){result={kind:'clarify',reply:'فيه حاجة وقفت التسجيل. راجع البيانات وجرب تاني.'};}
-  result.reply=simplifyResponse(result.reply);
+  const directCalculation=Boolean(advice?.calculations?.length&&!parsed.plan&&!advice.pendingResearch?.length);
+  const toolCompleted=Boolean(result.transaction||result.transactions?.length||result.summary||result.period||result.kind==='report'||result.kind==='saved'||directCalculation);
+  if(toolCompleted&&result.reply&&(directCalculation||!['advise','question'].includes(parsed.intent))) {
+    try {
+      const observation={intent:parsed.intent,kind:result.kind,transaction:result.transaction?{type:result.transaction.type,amount:result.transaction.amount,date:result.transaction.date,description:result.transaction.description}:null,
+        transactions:result.transactions?.map(row=>({type:row.type,amount:row.amount,date:row.date,description:row.description}))||[],summary:result.summary||null,period:result.period||null,plan:result.plan?.body||null,calculations:advice?.calculations||result.calculations||[]};
+      const finalText=await respondAfterTool({message:text,decision:parsed,observation,context:{project:advisor.context(project.id),history:context.history.slice(-8)}});
+      const checked=validateResponse(finalText,{facts:advisor.memory.facts(project.id),calculations:[{values:observation}],allowQuestion:false});
+      if(checked.valid)result.reply=checked.text;
+      else diagnostic('agent.final_response.rejected',{requestId,projectId:project.id,reasons:checked.reasons});
+    } catch(error) {
+      diagnostic('agent.final_response.failed',{requestId,projectId:project.id,code:error?.code||error?.name||'FINAL_RESPONSE_FAILED'});
+    }
+  }
   if(active?.status==='awaiting_confirmation'&&!result.pending&&['advice','answer','report'].includes(result.kind)) {
     setPending(conversation.id,project.id,active.action_type,active.status,{...active.payload,needsReview:true});
   }
   if(advice){
-    result.factsChanged=advice.factsChanged;result.advisorState=advice.state;result.plan=advice.plan;result.calculations=advice.calculations;result.research=advice.research;result.marketResearchChanged=advice.marketResearchChanged;result.speechText=simplifyResponse(result.kind==='advice'?advice.speechText:result.reply);
+    result.factsChanged=advice.factsChanged;result.advisorState=advice.state;result.plan=advice.plan;result.calculations=advice.calculations;result.research=advice.research;result.marketResearchChanged=advice.marketResearchChanged;result.speechText=result.reply;
     const needsAgentTask=!result.pending&&!active?.status&&(
       Boolean(advice.pendingResearch?.length)||Boolean(planIntent&&result.kind==='advice'));
     if(needsAgentTask) {
       const type=planIntent?'business_plan':'multi_step';
       const budget=taskBudget(type,config);
       const fingerprint=projectFingerprint(db,project.id);
+      const initialToolResults=(advice.calculations||[]).map(calculation=>{
+        const input={request:calculation.request||null,values:calculation.values||null,missing:calculation.missing||[],fingerprint};
+        const stepKey=`calculation:${createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0,24)}`;
+        return {kind:'calculation',key:calculation.id,stepKey,result:toolOutcome({tool:'analyze_scenario',invocationId:calculation.id,input:calculation.request||input,output:calculation,projectId:project.id})};
+      });
       let task;
       try {
         task=agentTasks.create({projectId:project.id,conversationId:conversation.id,sourceMessageId:userMessage.id,type,
           objective:parsed.state_update?.objective||parsed.plan?.title||advisor.memory.state(project.id).objective||text.slice(0,180),
-          payload:{message:text,parsed,initialAdvice:advice,projectFingerprint:fingerprint,baselineDecisionCount:1,
+          payload:{message:text,parsed,initialAdvice:advice,initialToolResults,projectFingerprint:fingerprint,baselineDecisionCount:1,
             baselineInputTokens:parsed.usage?.inputTokens||0,baselineOutputTokens:parsed.usage?.outputTokens||0},projectFingerprint:fingerprint,budget,decisionCount:1,
           inputTokens:parsed.usage?.inputTokens,outputTokens:parsed.usage?.outputTokens});
       } catch(error) {

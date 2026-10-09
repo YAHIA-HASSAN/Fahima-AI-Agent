@@ -2,31 +2,13 @@ const { createMemory } = require('./memory');
 const { hypothetical } = require('./planning');
 const { normalizeDigits } = require('./finance');
 const { createBusinessTools, executeBusinessTool } = require('./business-tools');
-const { cleanLanguage,validateText,chooseQuestion,calculationText } = require('./response-quality');
+const { validateResponse,chooseQuestion } = require('./response-validator');
+const { calculationDisplay } = require('./calculation-display');
 const marketResearch = require('./market-research');
 const { diagnostic } = require('./diagnostics');
 
-function researchText(results) {
-  const lines=[];
-  for(const result of results) {
-    if(result.pending)continue;
-    if(result.error) {lines.push(Number(result.error)===429
-      ?'حاولت أراجع المعلومة من الإنترنت، لكن بحث Gemini وصل لحد الاستخدام مؤقتًا. نقدر نكمل بفرضيات واضحة أو نرجع للبحث بعدين.'
-      :result.error==='SEARCH_TIMEOUT'
-        ?'بحث السوق اتأخر، فوقفت الانتظار. نقدر نكمل بحساب مشروط بأسعار تحددها أو نعيد البحث بعدين.'
-        :'حاولت أراجع المعلومة من الإنترنت، لكن البحث مش متاح دلوقتي. نقدر نكمل بفرضيات واضحة أو نرجع للبحث بعدين.');continue;}
-    if(result.cached)continue;
-    const selected=result.items?.find(row=>row.selected)||result.items?.find(row=>row.price!=null&&row.source_url);
-    if(selected) {
-      const quantity=selected.quantity&&selected.unit?` لكل ${selected.quantity} ${selected.unit}`:selected.unit?` لكل ${selected.unit}`:'';
-      lines.push(`لقيت سعر منشور لـ${selected.product_name||'البند المطلوب'}: ${Number(selected.price).toLocaleString('ar-EG',{maximumFractionDigits:2})} ${String(selected.currency).toUpperCase()==='EGP'?'جنيه':selected.currency}${quantity}. المصدر وتاريخ المراجعة ظاهرين في قسم بحث السوق. السعر مؤقت ومحتاج تأكيد التوفر والتوصيل قبل الشراء.`);
-    } else lines.push('راجعت مصادر على الإنترنت، لكن ملقتش سعرًا واضحًا بنفس الوحدة والمواصفات ينفع ندخله في الحساب. المصادر موجودة للمراجعة، والسعر لسه غير مؤكد.');
-  }
-  return [...new Set(lines)];
-}
-
 function createAdvisor(db,business) {
-  const memory=createMemory(db);
+  const memory=createMemory(db,business);
   function context(projectId) {
     const facts=memory.facts(projectId);
     const bounds=business.periodBounds('month');
@@ -97,35 +79,22 @@ function createAdvisor(db,business) {
         .map(item=>({type:item.transaction_type,product_name:item.product_name,quantity:item.quantity,unit:item.unit,amount:item.amount,amount_kind:item.amount_kind}));
       const qualityContext={facts:[...facts,...memory.researchFacts(projectId)],calculations,goals,proposals};
       let question=chooseQuestion(parsed.question,facts,previous.pending_question,applied.changed);
-      if(applied.conflicts.length) {
-        const conflict=applied.conflicts[0];
-        question={fact_key:conflict.key,reason:'تصحيح معلومة متعارضة',text:`المعلومة السابقة عن ${cleanLanguage(conflict.label)} هي ${cleanLanguage(conflict.previous)}. المقصود تغييرها إلى ${cleanLanguage(conflict.proposed)}؟`};
-      }
       const update=parsed.state_update?{...parsed.state_update}:null;
       if(update)for(const key of ['objective','capability','next_action','progress']) {
-        if(update[key]){const checked=validateText(update[key],qualityContext);update[key]=checked.valid?checked.text:null;}
+        if(update[key]){const checked=validateResponse(update[key],qualityContext);update[key]=checked.valid?checked.text:null;}
       }
       const state=options.preserveState?memory.state(projectId):memory.saveState(projectId,messageId,update,question);
-      for(const result of calculations)result.display=calculationText(result);
+      for(const result of calculations)result.display=calculationDisplay(result);
       let plan=null;
-      if(parsed.transaction_status==='planned'&&!parsed.plan&&['record_transaction','record_transactions'].includes(parsed.intent)) {
-        const items=parsed.transactions?.length?parsed.transactions:[parsed];
-        parsed.plan={title:'خطوات مقترحة للمشروع',summary:'دي خطوات لسه ما اتنفذتش، وهنراجع تكلفتها ومتطلباتها قبل التنفيذ.',
-          requirements:[],assumptions:[],risks:[],indicators:[],proposed_transactions:proposals,next_action:'مراجعة المتطلبات والتكلفة قبل أي شراء.',
-          steps:items.map((item,index)=>({key:`planned_${index}`,text:item.description||message,status:'proposed',evidence:null}))};
-      }
       const canUpdatePlan=!options.preserveState||memory.state(projectId).source_message_id===messageId;
       if(parsed.plan&&canUpdatePlan&&!applied.conflicts.length) {
         const texts=[parsed.plan.title,parsed.plan.summary,...parsed.plan.assumptions,...parsed.plan.requirements,...parsed.plan.risks,
           ...parsed.plan.steps.map(step=>step.text),...parsed.plan.indicators,parsed.plan.next_action];
-        if(texts.every(text=>validateText(text,qualityContext).valid)) {
+        if(texts.every(text=>validateResponse(text,qualityContext).valid)) {
           const sources=memory.research(projectId).filter(row=>row.selected).slice(0,20).map(row=>({title:row.source_title,url:row.source_url,kind:row.source_kind,
             product:row.product_name,specification:row.specification,price:row.price,currency:row.currency,unit:row.normalized_unit||row.unit,
             observed_on:row.observed_on,retrieved_at:row.retrieved_at,valid_until:row.valid_until,location:row.location,confidence:row.confidence,stale:row.stale}));
-          const cleanPlan={...parsed.plan,proposed_transactions:proposals,sources,project_facts:facts.map(row=>({key:row.key,label:row.label,value:row.value,certainty:row.certainty,unit:row.unit})),
-            title:cleanLanguage(parsed.plan.title),summary:cleanLanguage(parsed.plan.summary),
-            assumptions:parsed.plan.assumptions.map(cleanLanguage),requirements:parsed.plan.requirements.map(cleanLanguage),risks:parsed.plan.risks.map(cleanLanguage),
-            steps:parsed.plan.steps.map(step=>({...step,text:cleanLanguage(step.text)})),indicators:parsed.plan.indicators.map(cleanLanguage),next_action:cleanLanguage(parsed.plan.next_action)};
+          const cleanPlan={...parsed.plan,proposed_transactions:proposals,sources,project_facts:facts.map(row=>({key:row.key,label:row.label,value:row.value,certainty:row.certainty,unit:row.unit}))};
           plan=memory.savePlan(projectId,messageId,cleanPlan,calculations,message);
         }
       }
@@ -134,33 +103,14 @@ function createAdvisor(db,business) {
         memory.stalePlans(projectId);
         plan.stale=1;
       }
-      const checked=validateText(parsed.answer,qualityContext);
-      let reply=checked.valid?checked.text:'';
-      const math=calculations.map(calculationText).filter(Boolean);
-      if(math.length)reply=[reply,...math].filter(Boolean).join('\n');
-      const market=researchText(researchResults);
-      if(market.length)reply=[reply,...market].filter(Boolean).join('\n');
-      if(plan&&!reply)reply=plan.body.summary;
-      if(!reply) {
-        const next=validateText(state.next_action,qualityContext);
-        reply=next.valid&&next.text?next.text:'نقدر نرتب الخطوة الجاية من المعلومات المتاحة، وأي سعر مش معروف هنسيبه واضح لحد ما نتأكد منه.';
-      }
+      const checked=validateResponse(parsed.answer,qualityContext);
+      const next=validateResponse(state.next_action,qualityContext);
+      const reply=checked.valid&&checked.text?checked.text:question?.text||(plan?.body?.summary||'')||(next.valid?next.text:'')||'مش قادر أطلع رد موثوق من المعلومات الحالية.';
       const pendingResearch=researchResults.filter(row=>row.pending).map(row=>row.request);
-      if(pendingResearch.length)reply+='\nبدأت أراجع المعلومة المطلوبة من المصادر، والنتيجة هتظهر هنا لوحدها.';
-      else if(calculations.some(row=>row.missing.length))reply+=' الحساب الكامل محتاج بيانات مؤكدة أكتر؛ نقدر نبدأ بتقدير واضح الافتراضات أو نجمع عرض سعر بالتكلفة الكاملة.';
-      if(question)reply+=`\n${question.text}`;
-      const speech=[reply.split('\n')[0],...math.slice(0,1),question?.text].filter(Boolean);
-      return {reply,speechText:[...new Set(speech)].join(' '),calculations,plan,state,research:researchResults,pendingResearch,marketResearchChanged:researchResults.some(row=>!row.cached&&!row.pending&&!row.error),
+      return {reply,speechText:reply,calculations,plan,state,research:researchResults,pendingResearch,marketResearchChanged:researchResults.some(row=>!row.cached&&!row.pending&&!row.error),
         factsChanged:applied.changed.length>0||goalsChanged,conflicts:applied.conflicts,qualityIssues:checked.reasons};
     })();
   }
-  async function completeResearch(projectId,messageId,message,parsed) {
-    const completed=await process(projectId,messageId,message,parsed,{preserveState:true});
-    const fresh=completed.research.filter(row=>!row.cached);
-    const parts=[...researchText(fresh),...completed.calculations.map(row=>row.display).filter(Boolean)];
-    return {...completed,reply:parts.join('\n')||'خلصت مراجعة المصادر، لكن ملقتش معلومة واضحة تنفع ندخلها في الحساب.',
-      speechText:parts[0]||'خلصت مراجعة المصادر.'};
-  }
-  return {context,process,completeResearch,memory};
+  return {context,process,memory};
 }
 module.exports={createAdvisor};
