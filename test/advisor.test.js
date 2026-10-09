@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const { randomUUID }=require('node:crypto');
 const { calculate }=require('../server/planning');
-const { validateText, chooseQuestion }=require('../server/response-quality');
+const { validateText, chooseQuestion, simplifyResponse, calculationText }=require('../server/response-quality');
 const agent=require('../server/agent');
 const marketResearchModule=require('../server/market-research');
 
@@ -53,6 +53,16 @@ test('reply guard suppresses repeated questions and unsupported claims without d
   assert.equal(validateText('SELECT * FROM projects',{facts}).valid,false);
 });
 
+test('Arabic response simplifier keeps replies short, natural, and to one question',()=>{
+  assert.equal(simplifyResponse('مطلوب استكمال البيانات. يرجى توضيح المبلغ الإجمالي؟ وسعر الواحدة كام؟'),'محتاج أعرف حاجة واحدة بس. المبلغ كله كام؟');
+  assert.equal(simplifyResponse('ده اقتراح لخطة بديلة. ومش هيتسجل كمصروف تدفعيه.'),'دي فكرة تانية ممكنة للمشروع. ومش هسجله كمصروف اتدفع.');
+  assert.equal(simplifyResponse('بدأت أراجع المعلومات والأسعار والحسابات علشان أطلع نتيجة وخطة مناسبة. هتظهر هنا أول ما تجهز.'),'ثانية وهقولك النتيجة.');
+  assert.equal(simplifyResponse('حصلت مشكلة مؤقتة في المساعد. جرب تاني أو اكتب طلبك بشكل أوضح.'),'حصلت مشكلة عندي. جرّب تاني بعد شوية.');
+  assert.equal(validateText('المدخلات غير كافية',{facts:[]}).valid,true);
+  assert.equal(validateText('SELECT * FROM projects',{facts:[]}).valid,false);
+  assert.equal(calculationText({type:'revenue',values:{quantity:10,revenue:250}}),'بيع ١٠ وحدة بالسعر ده يجيب ٢٥٠ جنيه قبل طرح التكاليف. ده مش صافي مكسب.');
+});
+
 test('market search has a terminal timeout instead of hanging',async()=>{
   marketResearchModule.__setGeminiClientForTests({interactions:{create:()=>new Promise(()=>{})}});
   try {
@@ -98,7 +108,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
     await t.test('multiple facts save automatically once and memory supplies capital on follow-up',async()=>{
       const fields={facts:[fact('capital',10000,'معايا 10 آلاف جنيه'),fact('activity','تربية دواجن','مشروع دواجن'),fact('space','أوضة فاضية','عندي أوضة فاضية',{kind:'resource'})],state_update:state('تقييم بداية المشروع')};
       let response=await send(primary,msg,fields,'first-message');
-      assert.equal(response.kind,'clarify');assert.equal(response.taskStatus,'WAITING_FOR_INPUT');assert.doesNotMatch(response.reply,/أحفظ|capital/);
+      assert.equal(response.kind,'advice');assert.equal(response.taskStatus,undefined);assert.doesNotMatch(response.reply,/أحفظ|capital/);
       assert.equal(B.getProject(primary.projectId).capital,10000);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM project_facts WHERE project_id=?').get(primary.projectId).n,3);
       await send(primary,msg,fields,'first-message');
@@ -108,26 +118,24 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       assert.doesNotMatch(response.reply,/معاك كام/);
       assert.ok(captured.includes('10000'));assert.ok(response.plan);
     });
-    await t.test('direct actions cannot end as promises and report requests execute',async()=>{
+    await t.test('Gemini selects actions without phrase overrides or forced retry scripts',async()=>{
       let response=await send(primary,'احسب وقولي',{answer:'تمام، هنحسب ونقولك النتيجة.'});
-      assert.doesNotMatch(response.reply,/هنحسب|هنبدأ|هراجع/);
-      assert.match(response.reply,/ما بدأش|مدخلات/);
+      assert.equal(response.reply,'تمام، هنحسب ونقولك النتيجة.');
 
-      const oldNext=next;let calls=0;
+      let calls=0;
       agent.__setGeminiClientForTests({interactions:{create:async()=>{
         calls+=1;
-        const fields=calls===1?{answer:'تمام، هنحسب ونقولك النتيجة.'}:{answer:'التقسيم المبدئي حسب الميزانية المحفوظة.',calculations:[calc('budget',{budget:reference('capital'),reserve:literal(2000),lines:[{label:'بداية التشغيل',weight:1,amount:null}]})]};
-        return {output_text:JSON.stringify(output(fields))};
+        return {output_text:JSON.stringify(output({answer:'تمام، هنحسب ونقولك النتيجة.'}))};
       }}});
       response=await api('/api/chat',{...primary,message:'احسبي',requestId:'short-action-retry'});
-      assert.equal(calls,2);assert.equal(response.calculations[0].values.budget,10000);
-      assert.match(response.reply,/التقسيم المقترح/);
-      next=oldNext;agent.__setGeminiClientForTests({interactions:{create:async request=>{captured=request.input;return {output_text:JSON.stringify(decisionResponder?.(String(request.input||''))||next)};}}});
+      assert.equal(calls,1);assert.equal(response.reply,'تمام، هنحسب ونقولك النتيجة.');
+      agent.__setGeminiClientForTests({interactions:{create:async request=>{captured=request.input;return {output_text:JSON.stringify(output({intent:'create_report',period:'month',answer:'هجهز التقرير.'}))};}}});
 
       response=await send(primary,'وريني حسابات الشهر ده',{intent:'question',period:'month',answer:'حاضر، هجهز التقرير.'});
       assert.equal(response.kind,'report');assert.ok(response.period.from);assert.ok(response.period.to);
       const report=await api(`/api/report?projectId=${primary.projectId}&from=${response.period.from}&to=${response.period.to}`);
       assert.equal(report.status,200);assert.ok(report.summary);
+      agent.__setGeminiClientForTests({interactions:{create:async request=>{captured=request.input;return {output_text:JSON.stringify(decisionResponder?.(String(request.input||''))||next)};}}});
     });
     await t.test('the reported poultry conversation executes research and calculation without promise loops',async()=>{
       const scope=await create('محادثة الدواجن');
@@ -135,7 +143,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
         facts:[fact('capital',10000,'معايا 10 تلاف جنيه'),fact('activity','مشروع دواجن','مشروع دواجن')],
         state_update:state('تجهيز بداية مناسبة للمشروع'),answer:'المبلغ والنشاط اتسجلوا. هحدد متطلبات البداية الأساسية وأحسب خطة أولية من غير ما أفترض أسعار.'
       });
-      assert.equal(response.kind,'clarify');assert.equal(response.taskStatus,'WAITING_FOR_INPUT');assert.equal(B.getProject(scope.projectId).capital,10000);
+      assert.equal(response.kind,'advice');assert.equal(response.taskStatus,undefined);assert.equal(B.getProject(scope.projectId).capital,10000);
       response=await send(scope,'عايز ايه يعني مش فاهم منك حاجه',{answer:'هحسب لك عدد بداية مبدئي بعد مراجعة سعر الكتكوت والعلف، وهسيب جزء للتجهيز والطوارئ.',state_update:state('تجهيز بداية مناسبة للمشروع')});
       assert.doesNotMatch(response.reply,/هل نبدأ|معاك كام/);
 
@@ -161,12 +169,9 @@ test('adaptive advisory scenarios persist independently and survive an applicati
           assumptions:['مخصص الكتاكيت جزء من الميزانية، والباقي للعلف والتجهيز والطوارئ.'],requirements:['مراجعة المكان والتدفئة والمياه والتحصين.']},
         state_update:state('تجهيز بداية مناسبة للمشروع')
       });
-      assert.ok(response.researchJobId);assert.ok(captured.includes('10000'));
-      const finished=await researchJob(response.researchJobId,scope.projectId);
-      assert.equal(finished.status,'completed');
-      assert.equal(finished.result.calculations[0].values.quantity,60);
-      assert.match(finished.result.reply,/60|٦٠/);
-      assert.ok(finished.result.research.flatMap(row=>row.items).some(item=>item.source_url===chickSource));
+      assert.ok(captured.includes('10000'));
+      assert.equal(response.kind,'advice');
+      assert.ok(response.research?.flatMap(row=>row.items||[]).some(item=>item.source_url===chickSource));
 
       response=await send(scope,'فين؟',{},'poultry-where');
       assert.match(response.reply,/60|٦٠/);assert.doesNotMatch(response.reply,/معاك يا فندم|هنحسب/);
@@ -240,7 +245,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       assert.match(response.reply,/مش متاح/);assert.equal(response.advisorState.objective,before);
       const resumed=await send(primary,'طيب كمل الخطة',{state_update:state(null,'resume')});
       assert.equal(resumed.advisorState.objective,before);
-      assert.ok(captured.includes('بداية صغيرة'));
+      assert.ok(captured.includes(before));
     });
     await t.test('price provenance, explicit correction, hypothetical capital and frustration',async()=>{
       let response=await send(primary,'سعر الكتكوت حوالي 10 جنيه',{facts:[fact('input_price',10,'سعر الكتكوت حوالي 10 جنيه',{kind:'price',certainty:'approximate',observed_on:B.localDate()})]});
@@ -288,27 +293,25 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       assert.equal(planned.kind,'advice');assert.ok(planned.plan);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,before);
       const actual=await send(primary,'اشتريت 50 كتكوت بخمسمية',{...purchase,transaction_status:'actual',description:'اشتريت 50 كتكوت'},'purchase');
-      assert.equal(actual.kind,'confirm');
+      assert.equal(actual.kind,'saved');
       await send(primary,'اشتريت 50 كتكوت بخمسمية',{...purchase,transaction_status:'actual'},'purchase');
-      assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,before);
-      const saved=await send(primary,'أيوه',{},'confirm-purchase');assert.equal(saved.kind,'saved');
-      await send(primary,'أيوه',{},'confirm-purchase');
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,before+1);
     });
     await t.test('project switching resolves only explicit database names without transferring facts',async()=>{
-      const response=await send(primary,'نروح مشروع محل',{intent:'switch_project',project_reference:'محل',facts:[fact('capital',9999,'نروح مشروع محل')]});
+      const destination=await create('مشروع الانتقال');
+      const response=await send(primary,'نروح مشروع الانتقال',{intent:'switch_project',project_reference:'مشروع الانتقال',facts:[fact('capital',9999,'نروح مشروع الانتقال')]});
       assert.equal(response.kind,'switch_project');assert.notEqual(response.projectId,primary.projectId);
-      assert.equal(B.getProject(response.projectId).capital,6000);assert.equal(B.getProject(primary.projectId).capital,12000);
-      assert.equal((await send(primary,'كمل',{intent:'switch_project',project_reference:'محل'})).kind,'clarify');
+      assert.equal(response.projectId,destination.projectId);assert.equal(B.getProject(response.projectId).capital,null);assert.equal(B.getProject(primary.projectId).capital,12000);
+      assert.equal((await send(primary,'كمل',{intent:'switch_project',project_reference:'مشروع الانتقال'})).kind,'clarify');
     });
     await t.test('mixed actual and planned operations keep separate records and side questions preserve financial review',async()=>{
       const scope=await create('عمليات مختلطة');
       const item=(status,description,amount)=>({transaction_status:status,transaction_type:'operating_expense',amount,amount_kind:'total',date:'',description,estimated:false,product_name:null,quantity:null,unit:null,unit_price:null});
       const response=await send(scope,'دفعت 20 جنيه نقل وهشتري خامات بـ50 جنيه',{intent:'record_transactions',transaction_status:'actual',transactions:[item('actual','نقل',20),item('planned','خامات بـ50 جنيه',50)]});
-      assert.equal(response.kind,'confirm');assert.equal(response.pending.payload.amount,20);assert.ok(response.plan);
+      assert.equal(response.kind,'saved');assert.ok(response.plan);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE project_id=? AND amount=20').get(scope.projectId).n,1);
       await send(scope,'إزاي أحسن البيع؟',{state_update:state('سؤال جانبي','interrupt')});
-      assert.equal((await send(scope,'أيوه')).kind,'confirm');
-      const saved=await send(scope,'أيوه');assert.equal(saved.transaction.amount,20);
+      assert.equal((await send(scope,'أيوه')).kind,'advice');
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE project_id=?').get(scope.projectId).n,1);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM business_plans WHERE project_id=?').get(scope.projectId).n,1);
     });
@@ -350,7 +353,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       assert.equal(after.state.objective,before.state.objective);assert.equal(after.plan.id,before.plan.id);
       assert.equal(after.goals[0].target,5000);assert.equal(B.getProject(primary.projectId).capital,12000);
       const n=db.prepare('SELECT COUNT(*) n FROM transactions').get().n;
-      assert.equal((await send(primary,'أيوه',{},'confirm-purchase')).kind,'saved');
+      assert.equal((await send(primary,'أيوه',{},'confirm-purchase')).kind,'advice');
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,n);
       const reply=await send(primary,'كمل',{state_update:state(null,'resume')});
       assert.equal(reply.advisorState.objective,before.state.objective);assert.ok(captured.includes('12000'));

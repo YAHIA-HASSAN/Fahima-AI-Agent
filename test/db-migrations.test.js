@@ -33,14 +33,16 @@ test('forward migration repairs a version-8 database without losing business dat
     db.prepare("INSERT INTO business_plans(project_id,revision,title,body) VALUES(1,1,'خطة قائمة','{}')").run();
     db.exec('DROP TABLE agent_task_deliveries; PRAGMA user_version=8;');
     loaded.restore(); loaded=loadDatabase(dbPath); db=loaded.db;
-    assert.equal(db.pragma('user_version',{simple:true}),9);
+    assert.equal(db.pragma('user_version',{simple:true}),10);
+    assert.ok(db.prepare('PRAGMA table_info(transactions)').all().some(x=>x.name==='voided_at'));
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transaction_audit'").get());
     assert.deepEqual(db.prepare('PRAGMA table_info(agent_task_deliveries)').all().map(x=>x.name).sort(),['delivered_at','message_id','task_id']);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM projects').get().n,1);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,1);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM business_plans').get().n,1);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM conversations WHERE id=?').get(conversation.lastInsertRowid).n,1);
     loaded.restore(); loaded=loadDatabase(dbPath); db=loaded.db;
-    assert.equal(db.pragma('user_version',{simple:true}),9);
+    assert.equal(db.pragma('user_version',{simple:true}),10);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions').get().n,1);
   } finally { loaded?.restore(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

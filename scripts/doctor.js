@@ -42,11 +42,11 @@ try {
   const result = db.prepare('PRAGMA quick_check').get();
   check('SQLite', result?.quick_check === 'ok', result?.quick_check || 'database check failed', true);
   const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
-  const requiredTables = ['projects','transactions','conversations','messages','project_facts','agent_tasks','agent_task_steps','agent_task_metrics','agent_task_deliveries','business_plans','chat_requests'];
+  const requiredTables = ['projects','transactions','conversations','messages','project_facts','agent_tasks','agent_task_steps','agent_task_metrics','agent_task_deliveries','business_plans','transaction_audit','chat_requests'];
   const missingTables = requiredTables.filter(name => !tables.has(name));
   const schemaVersion = db.pragma('user_version', { simple: true });
   check('Database path', Boolean(db.dbPath), db.dbPath || 'unavailable', true);
-  check('Schema version', schemaVersion >= 9, `version ${schemaVersion}; latest migration 9`, true);
+  check('Schema version', schemaVersion >= 10, `version ${schemaVersion}; latest migration 10`, true);
   check('Required tables', missingTables.length === 0, missingTables.length ? `missing: ${missingTables.join(', ')}` : `${requiredTables.length} core tables present`, true);
   const deliveryColumns = tables.has('agent_task_deliveries')
     ? db.prepare('PRAGMA table_info(agent_task_deliveries)').all().map(column => column.name).sort()
@@ -57,8 +57,12 @@ try {
   const indexes = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map(row => row.name));
   const taskIndexes = ['agent_tasks_claim_idx','agent_tasks_scope_idx'];
   check('Agent task indexes', taskIndexes.every(name => indexes.has(name)), taskIndexes.filter(name => !indexes.has(name)).join(', ') || 'claim and project-scope indexes ready', true);
-  check('Pending migrations', schemaVersion >= 9, schemaVersion >= 9 ? 'none' : 'database migration required', true);
-  check('Agent worker readiness', deliveryReady && schemaVersion >= 9 && requiredTables.every(name => tables.has(name)), 'database is initialized before worker startup', true);
+  const transactionIndexes=['transactions_active_project_idx','transaction_audit_scope_idx'];
+  const transactionColumns=new Set(tables.has('transactions')?db.prepare('PRAGMA table_info(transactions)').all().map(column=>column.name):[]);
+  const auditReady=tables.has('transaction_audit')&&transactionColumns.has('voided_at')&&transactionColumns.has('void_reason')&&transactionIndexes.every(name=>indexes.has(name));
+  check('Transaction correction audit',auditReady,auditReady?'corrections and undo history are available':'correction audit schema is incomplete',true);
+  check('Pending migrations', schemaVersion >= 10, schemaVersion >= 10 ? 'none' : 'database migration required', true);
+  check('Agent worker readiness', deliveryReady && schemaVersion >= 10 && requiredTables.every(name => tables.has(name)), 'database is initialized before worker startup', true);
   db.close();
 } catch (error) {
   check('SQLite / schema initialization', false, 'database could not be opened or safely migrated; check DB_PATH and migration diagnostics', true);

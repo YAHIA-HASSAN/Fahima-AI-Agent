@@ -10,7 +10,7 @@ const { createBusinessTools, executeBusinessTool } = require('./business-tools')
 const { randomUUID, createHash } = require('node:crypto');
 const { createGeminiClient } = require('./gemini-client');
 const { createAdvisor } = require('./advisor');
-const { cleanLanguage } = require('./response-quality');
+const { simplifyResponse } = require('./response-quality');
 const { withDeadline } = require('./deadline');
 const { createResearchJobs } = require('./research-jobs');
 const { createAgentTasks } = require('./agent-tasks');
@@ -103,7 +103,23 @@ function currentContext(conversation,project,currentMessage='') {
   const products=B.getProducts(project.id)
     .sort((a,b)=>Number(relevantTerms.includes(b.name.toLocaleLowerCase()))-Number(relevantTerms.includes(a.name.toLocaleLowerCase())))
     .slice(0,20).map(p=>({name:p.name,unit:p.unit,current_quantity:p.current_quantity,unit_cost:p.unit_cost,markup_percent:p.markup_percent}));
-  return {advisor:advisor.context(project.id),availableProjects:db.prepare('SELECT name FROM projects ORDER BY id').all(),history,summary:conversation.summary||'',facts,products,pending:pendingFor(conversation.id),profile:{name:project.name,activity:project.activity,products:project.products,capital:project.capital,costs:project.costs,sales_method:project.sales_method,household_use:project.household_use}};
+  const recentTransactions=db.prepare(`SELECT t.type,t.amount,t.date,t.description,i.quantity,i.unit,i.unit_price,p.name AS product_name
+    FROM transactions t LEFT JOIN transaction_items i ON i.transaction_id=t.id LEFT JOIN products p ON p.id=i.product_id
+    WHERE t.project_id=? AND t.voided_at IS NULL ORDER BY t.id DESC LIMIT 12`).all(project.id);
+  return {advisor:advisor.context(project.id),availableProjects:db.prepare('SELECT name FROM projects ORDER BY id').all(),history,summary:conversation.summary||'',facts,products,pending:pendingFor(conversation.id),recentTransactions,profile:{name:project.name,activity:project.activity,products:project.products,capital:project.capital,costs:project.costs,sales_method:project.sales_method,household_use:project.household_use}};
+}
+
+function findTransactionTarget(projectId, parsed) {
+  const reference=String(parsed.transaction_reference||'').trim().toLocaleLowerCase('ar-EG');
+  const rows=db.prepare(`SELECT t.id,t.type,t.amount,t.date,t.description,p.name AS product_name
+    FROM transactions t LEFT JOIN transaction_items i ON i.transaction_id=t.id LEFT JOIN products p ON p.id=i.product_id
+    WHERE t.project_id=? AND t.voided_at IS NULL ORDER BY t.id DESC LIMIT 50`).all(projectId);
+  let candidates=rows;
+  if(parsed.transaction_type)candidates=candidates.filter(row=>row.type===parsed.transaction_type);
+  if(parsed.product_name)candidates=candidates.filter(row=>String(row.product_name||'').includes(parsed.product_name)||String(row.description||'').includes(parsed.product_name));
+  if(reference&&reference!=='latest')candidates=candidates.filter(row=>String(row.description||'').includes(parsed.transaction_reference)||String(row.product_name||'').includes(parsed.transaction_reference));
+  if(reference==='latest')return candidates.slice(0,1);
+  return candidates.length===1?candidates:[];
 }
 const taskRunner=createTaskRunner({db,advisor,config,contextFor:(conversationId,projectId,message)=>{
   const conversation=B.getConversation(projectId,conversationId),project=B.getProject(projectId);
@@ -372,22 +388,6 @@ app.post('/api/chat',async(req,res)=>{
         researchJobId:['queued','running'].includes(update.status)?update.id:null,conversationId:conversation.id,inputType});
     }
   }
-  const planIntent=/(?:دراسة جدوى|(?:عايز|عايزة)\s+خطة|(?:اعملي|اعمل|اكتبلي|اكتب لي|جهزلي|جهز لي).{0,25}خطة|(?:ابدأ|أبدأ)\s*(?:لي\s*)?مشروع|(?:عايز|عايزة|نفسي).{0,50}(?:أبدأ|ابدأ|أعمل|اعمل).{0,30}مشروع)/u.test(text);
-  if(planIntent&&!active) {
-    const fingerprint=projectFingerprint(db,project.id),budget=taskBudget('business_plan',config);
-    let task;
-    try {
-      task=agentTasks.create({projectId:project.id,conversationId:conversation.id,sourceMessageId:userMessage.id,type:'business_plan',
-        objective:text.slice(0,180),payload:{message:text,parsed:null,projectFingerprint:fingerprint,baselineDecisionCount:0,baselineInputTokens:0,baselineOutputTokens:0},projectFingerprint:fingerprint,budget});
-    } catch(error) {
-      const code=String(error?.code||error?.name||'AGENT_TASK_CREATE_FAILED').replace(/[^A-Za-z0-9_-]/gu,'').slice(0,80)||'AGENT_TASK_CREATE_FAILED';
-      diagnostic('agent.task.create.failed',{requestId,projectId:project.id,conversationId:conversation.id,code});
-      return res.status(503).json({error:'اتسجلت رسالتك، لكن ماقدرتش أبدأ تجهيز الخطة دلوقتي. جرّب الإرسال تاني بعد شوية.',code:'AGENT_TASK_CREATE_FAILED'});
-    }
-    const reply='بدأت أفهم ظروف المشروع وأجهز خطة مناسبة. هتظهر هنا النتيجة أو أهم معلومة محتاجاها علشان أكمل.';
-    addAssistant(conversation.id,reply);scheduleSummary(conversation);
-    return res.json({kind:'task',reply,agentTaskId:task.id,agentTaskStatus:task.status,conversationId:conversation.id,inputType});
-  }
   if(active?.status==='awaiting_confirmation'&&affirmative){
     if(active.payload.needsReview) {
       const rows=active.action_type==='transaction_batch'?active.payload.transactions:active.action_type==='transaction'?[active.payload]:[];
@@ -401,6 +401,14 @@ app.post('/api/chat',async(req,res)=>{
     try{const result=await commitPending(project,conversation,active);const reply=result.reply;addAssistant(conversation.id,reply);scheduleSummary(conversation);return res.json({kind:'saved',reply,transaction:result.transaction,transactions:result.transactions,conversationId:conversation.id,inputType});}
     catch(e){const reply=e.message;addAssistant(conversation.id,reply);return res.json({kind:'clarify',reply,conversationId:conversation.id,inputType});}
   }
+  async function recordValidatedTransactions(actionType, payload, pendingId = null) {
+    const outcome=await commitPending(project,conversation,{action_type:actionType,status:'ready',payload});
+    const reply=outcome.reply;
+    addAssistant(conversation.id,reply);scheduleSummary(conversation);
+    return res.json({kind:'saved',reply,transaction:outcome.transaction,transactions:outcome.transactions,
+      plan:advice?.plan||null,calculations:advice?.calculations||[],research:advice?.research||[],factsChanged:advice?.factsChanged||[],
+      conversationId:conversation.id,inputType,requestId});
+  }
   if(active&&negative){db.prepare('DELETE FROM pending_actions WHERE conversation_id=?').run(conversation.id);const reply='تمام، ألغيت العملية وماتسجلتش.';addAssistant(conversation.id,reply);return res.json({kind:'answer',reply,conversationId:conversation.id,inputType});}
   const context=currentContext(conversation,project,text);let parsed;
   const tools=createBusinessTools(project.id);
@@ -408,37 +416,9 @@ app.post('/api/chat',async(req,res)=>{
     const domainCheck=isOutOfDomain(text);
     if(domainCheck) parsed={intent:'question',answer:'أنا فهيمة، شغلي أساعدك في مشروعك والبيع والمصاريف والمشتريات والمخزون وتنظيم الشغل. احكي لي عن حاجة تخص مشروعك وأنا أساعدك.'};
     else parsed=await extract(text,context);
-    const wantsReport=/(?:اعملي|اعمل|وريني|هات).{0,20}(?:تقرير|حسابات)/u.test(text);
-    if(wantsReport&&!['create_report','daily_sales_summary','period_summary'].includes(parsed.intent))parsed.intent='create_report';
-    const directAction=/(?:احسب(?:ي)?|قسم(?:ي)?لي|هجيب (?:كام|قد)|اعملي خطة|اعمل خطة|شوف(?:ي)? الأسعار|دور(?:ي)? على السعر)/u.test(text);
-    const hasExecution=value=>(value?.calculations?.length||0)>0||(value?.research_requests?.length||0)>0||Boolean(value?.plan)||['create_report','daily_sales_summary','period_summary','inventory_query','product_sales_query','price_estimate'].includes(value?.intent);
-    if(directAction&&!hasExecution(parsed)) {
-      diagnostic('agent.action.retry',{requestId,projectId:project.id,conversationId:conversation.id,reason:'model_returned_no_action'});
-      try {
-        const retry=await extract(text,{...context,actionRequested:true});
-        if(hasExecution(retry))parsed=retry;
-        else {
-          const knownFacts=advisor.memory.facts(project.id);
-          const capital=knownFacts.find(fact=>fact.key==='capital'&&fact.numeric_value!=null);
-          const activity=knownFacts.find(fact=>fact.key==='activity');
-          const prices=knownFacts.filter(fact=>fact.kind==='price'&&fact.numeric_value!=null);
-          const references=advisor.memory.research(project.id,{freshOnly:true}).filter(row=>row.price!=null);
-          const hasPrice=prices.length||references.length;
-          const hasProjectInputs=capital&&activity&&!hasPrice;
-          const reply=hasProjectInputs
-            ?`ميزانية مشروع ${activity.value} المحفوظة هي ${Number(capital.numeric_value).toLocaleString('ar-EG')} جنيه. عشان أطلع عدد مسؤول، لازم أراجع سعر المدخلات الأساسية؛ الأسعار مش محفوظة عندي ومش هخمنها.`
-            :'مش لاقية بيانات كفاية أطلع منها حساب موثوق. هستخدم الأرقام المتاحة عندك ومش هخمن أي رقم ناقص.';
-          const question=hasProjectInputs
-            ?{text:'إيه أهم منتج أو خامة أراجع سعرها الأول؟',fact_key:null,reason:'اختيار المدخل الأساسي لحساب بداية المشروع'}
-            :{text:'إيه المبلغ أو العدد اللي عايز تحسبه؟',fact_key:null,reason:'تحديد مدخل الحساب المطلوب'};
-          parsed={...retry,answer:reply,question,calculations:[],research_requests:[],plan:null};
-          diagnostic('agent.action.incomplete',{requestId,projectId:project.id,conversationId:conversation.id,reason:'no_supported_inputs'});
-        }
-      } catch(error) {
-        parsed={...parsed,answer:'حاولت أكمّل الحساب من سياق كلامنا، لكن ماقدرتش أحدد مدخلات موثوقة. مش هخمن أسعار أو أرقام. قوليلي سعر المنتج أو الخامة اللي عايز تحسبها.',question:null};
-        diagnostic('agent.action.retry_failed',{requestId,projectId:project.id,conversationId:conversation.id,errorCode:error?.code||error?.status||'unknown'});
-      }
-    }
+    // Gemini chooses whether this is planning, reporting, research, or advice.
+    // The server dispatches only validated structured intents; it does not infer
+    // intent from fixed phrases in the user's wording.
     diagnostic('agent.action.selected',{requestId,projectId:project.id,conversationId:conversation.id,intent:parsed.intent,researchCount:parsed.research_requests?.length||0,calculationCount:parsed.calculations?.length||0});
   }catch(e){
     const status=Number(e?.status||e?.statusCode||e?.response?.status||e?.cause?.status||0);
@@ -465,6 +445,7 @@ app.post('/api/chat',async(req,res)=>{
   }
   if(parsed.intent==='record_transactions'&&parsed.transactions?.length===1)parsed={...parsed,...parsed.transactions[0],intent:'record_transaction'};
   if(Array.isArray(parsed.transactions)&&parsed.transactions.length>1)parsed.intent='record_transactions';
+  const planIntent=Boolean(parsed.plan);
   let result,advice;
   try{
     if(parsed.intent==='switch_project') {
@@ -482,20 +463,55 @@ app.post('/api/chat',async(req,res)=>{
 
     if(active?.action_type==='transaction_batch'&&active.status==='waiting_for_details'&&parsed.intent==='record_transaction'){
       const tx=transactionBatchPending([],active,text,parsed);setPending(conversation.id,project.id,'transaction_batch',tx.status,tx.payload);
-      result={kind:tx.status==='awaiting_confirmation'?'confirm':'clarify',reply:tx.reply,pending:{action_type:'transaction_batch',status:tx.status,payload:tx.payload}};
+      if(tx.status==='ready')return await recordValidatedTransactions('transaction_batch',tx.payload,active.id);
+      result={kind:'clarify',reply:tx.reply,pending:{action_type:'transaction_batch',status:tx.status,payload:tx.payload}};
     } else switch(parsed.intent){
+      case 'correct_transaction':
+      case 'undo_transaction': {
+        const targets=findTransactionTarget(project.id,parsed);
+        if(targets.length!==1) {
+          const recent=B.getTransactions(project.id,'0001-01-01',B.localDate()).slice(0,4);
+          result={kind:'clarify',reply:recent.length
+            ?`مش واضح أنهي عملية تقصدي. أقرب العمليات: ${recent.map(row=>`${row.date} ${transactionKindLabel(row.type)} ${Number(row.amount).toLocaleString('ar-EG')} جنيه`).join('، ')}. حددي واحدة منهم.`
+            :'مش لاقية عملية مسجلة أقدر أعدلها.'};
+          break;
+        }
+        const target=targets[0];
+        if(parsed.intent==='undo_transaction') {
+          const voided=B.voidTransaction(project.id,target.id,text);
+          advisor.memory.stalePlans(project.id);
+          result={kind:'saved',reply:`تمام، ألغيت ${transactionKindLabel(voided.type)} بـ${Number(voided.amount).toLocaleString('ar-EG')} جنيه.`};
+          break;
+        }
+        const changes={};
+        if(parsed.amount!=null)changes.amount=parsed.amount;
+        if(parsed.date)changes.date=parsed.date;
+        if(parsed.description)changes.description=parsed.description;
+        if(parsed.quantity!=null)changes.quantity=parsed.quantity;
+        if(parsed.unit_price!=null)changes.unit_price=parsed.unit_price;
+        if(!Object.keys(changes).length){result={kind:'clarify',reply:'إيه اللي محتاج يتعدل؟'};break;}
+        const corrected=B.correctTransaction(project.id,target.id,changes,text);
+        advisor.memory.stalePlans(project.id);
+        result={kind:'saved',reply:`تمام، عدلتها. الإجمالي دلوقتي ${Number(corrected.amount).toLocaleString('ar-EG')} جنيه.`};
+        break;
+      }
       case 'record_transactions': {
         if (!Array.isArray(parsed.transactions) || parsed.transactions.length < 2 || parsed.transactions.length > 50) { result={kind:'clarify',reply:'قول لي كل عملية ومبلغها بوضوح، وعددهم ما يزيدش عن 50.'};break; }
-        const tx=transactionBatchPending(parsed.transactions,null,text);setPending(conversation.id,project.id,'transaction_batch',tx.status,tx.payload);
-        result={kind:tx.status==='awaiting_confirmation'?'confirm':'clarify',reply:tx.reply,pending:{action_type:'transaction_batch',status:tx.status,payload:tx.payload}};break;
+        const tx=transactionBatchPending(parsed.transactions,null,text);
+        if(tx.status==='ready')return await recordValidatedTransactions('transaction_batch',tx.payload);
+        setPending(conversation.id,project.id,'transaction_batch',tx.status,tx.payload);
+        result={kind:'clarify',reply:tx.reply,pending:{action_type:'transaction_batch',status:tx.status,payload:tx.payload}};break;
       }
       case 'record_transaction': {
         if(active?.action_type==='transaction_batch'&&active.status==='waiting_for_details'){
           const tx=transactionBatchPending([],active,text,parsed);setPending(conversation.id,project.id,'transaction_batch',tx.status,tx.payload);
-          result={kind:tx.status==='awaiting_confirmation'?'confirm':'clarify',reply:tx.reply,pending:{action_type:'transaction_batch',status:tx.status,payload:tx.payload}};break;
+          if(tx.status==='ready')return await recordValidatedTransactions('transaction_batch',tx.payload,active.id);
+          result={kind:'clarify',reply:tx.reply,pending:{action_type:'transaction_batch',status:tx.status,payload:tx.payload}};break;
         }
-        const tx=transactionPending(parsed,active,text);setPending(conversation.id,project.id,'transaction',tx.status,tx.payload);
-        result={kind:tx.status==='awaiting_confirmation'?'confirm':'clarify',reply:tx.reply,pending:{action_type:'transaction',status:tx.status,payload:tx.payload}};break;
+        const tx=transactionPending(parsed,active,text);
+        if(tx.status==='ready')return await recordValidatedTransactions('transaction',tx.payload,active?.id);
+        setPending(conversation.id,project.id,'transaction',tx.status,tx.payload);
+        result={kind:'clarify',reply:tx.reply,pending:{action_type:'transaction',status:tx.status,payload:tx.payload}};break;
       }
       case 'daily_sales_summary':
       case 'period_summary': {
@@ -517,13 +533,14 @@ app.post('/api/chat',async(req,res)=>{
       }
       case 'create_report': {
         const bounds=B.periodBounds(parsePeriod(parsed));
-        result={kind:'report',reply:'حاضر، بجهز تقرير PDF للفترة دي. هيكون اتحمّل على جهازك.',period:bounds};break;
+        result={kind:'report',reply:'ثانية والتقرير هيكون جاهز للتنزيل.',period:bounds};break;
       }
       case 'create_reminder': {
         const old=active?.action_type==='reminder'?active.payload:{};
         const payload={title:parsed.reminder_title||old.title||parsed.description||'',dueAt:parsed.due_date||old.dueAt||''};
         if(!payload.title||!validDate(payload.dueAt)){setPending(conversation.id,project.id,'reminder','waiting_for_details',payload);result={kind:'clarify',reply:!payload.title?'أفكرك تعملي إيه؟':'تحب أذكرك في أنهي يوم؟'};break;}
-        setPending(conversation.id,project.id,'reminder','awaiting_confirmation',payload);result={kind:'confirm',reply:`أفكرك بـ${payload.title} يوم ${payload.dueAt}؟ قول «أيوه» للحفظ أو صححيها بالكلام.`,pending:{action_type:'reminder',status:'awaiting_confirmation',payload}};break;
+        B.addReminder(project.id,payload.title,payload.dueAt);db.prepare('DELETE FROM pending_actions WHERE conversation_id=?').run(conversation.id);
+        result={kind:'saved',reply:`تمام، سجلتلك تذكير بـ${payload.title} يوم ${payload.dueAt}.`};break;
       }
       case 'price_estimate': {
         const product=parsed.product_name?B.findProduct(project.id,parsed.product_name):null;const cost=parsed.amount??parsed.unit_price??product?.unit_cost;const markup=parsed.markup_percent??product?.markup_percent;
@@ -539,13 +556,13 @@ app.post('/api/chat',async(req,res)=>{
 
 
     }
-  }catch(e){result={kind:'clarify',reply:/\p{Script=Arabic}/u.test(e.message||'')?e.message:'مش قادر أتعامل مع الطلب دلوقتي. ممكن نوضح التفاصيل؟'};}
-  result.reply=cleanLanguage(result.reply);
+  }catch(e){result={kind:'clarify',reply:'فيه حاجة وقفت التسجيل. راجع البيانات وجرب تاني.'};}
+  result.reply=simplifyResponse(result.reply);
   if(active?.status==='awaiting_confirmation'&&!result.pending&&['advice','answer','report'].includes(result.kind)) {
     setPending(conversation.id,project.id,active.action_type,active.status,{...active.payload,needsReview:true});
   }
   if(advice){
-    result.factsChanged=advice.factsChanged;result.advisorState=advice.state;result.plan=advice.plan;result.calculations=advice.calculations;result.research=advice.research;result.marketResearchChanged=advice.marketResearchChanged;result.speechText=result.kind==='advice'?advice.speechText:result.reply;
+    result.factsChanged=advice.factsChanged;result.advisorState=advice.state;result.plan=advice.plan;result.calculations=advice.calculations;result.research=advice.research;result.marketResearchChanged=advice.marketResearchChanged;result.speechText=simplifyResponse(result.kind==='advice'?advice.speechText:result.reply);
     const needsAgentTask=!result.pending&&!active?.status&&(
       Boolean(advice.pendingResearch?.length)||Boolean(planIntent&&result.kind==='advice'));
     if(needsAgentTask) {
@@ -566,7 +583,8 @@ app.post('/api/chat',async(req,res)=>{
       }
       result.agentTaskId=task.id;result.agentTaskStatus=task.status;
       result.researchJobId=task.id;
-      result.reply='بدأت أراجع المعلومات والأسعار والحسابات علشان أطلع نتيجة وخطة مناسبة. هتظهر هنا أول ما تجهز.';
+      result.kind='task';
+      result.reply='ثانية وهقولك النتيجة.';
       result.speechText=result.reply;
     }
   }
@@ -591,14 +609,14 @@ function recordPlanOutcome(projectId,transaction,input) {
     proposal.amount_kind==='total'&&proposal.amount!=null?Number(transaction.amount)-Number(proposal.amount):null);
 }
 async function commitPending(project,conversation,active) {
-  if(active.status!=='awaiting_confirmation')throw new Error('كمّلي البيانات وراجعها قبل الحفظ.');
+  if(!['ready','awaiting_confirmation'].includes(active.status))throw new Error('كمّلي البيانات وراجعها قبل الحفظ.');
   const payload=active.payload;
   if(active.action_type==='transaction'){
     const transaction=B.recordTransaction(project.id,payload);
     recordPlanOutcome(project.id,transaction,payload);
     advisor.memory.stalePlans(project.id);
     db.prepare('DELETE FROM pending_actions WHERE conversation_id=?').run(conversation.id);
-    return {transaction,reply:`تمام، سجلت العملية بـ${Number(transaction.amount).toLocaleString('ar-EG')} جنيه.`};
+    return {transaction,reply:`تمام، سجلت ${transactionKindLabel(transaction.type)} بـ${Number(transaction.amount).toLocaleString('ar-EG')} جنيه.${transaction.inventory_tracked===false?' البيع اتسجل، لكن المخزون ما اتغيرش لأن الرصيد مش متسجل كفاية.':''}`};
   }
   if(active.action_type==='transaction_batch'){
     const saveBatch=db.transaction(()=>{
@@ -608,7 +626,7 @@ async function commitPending(project,conversation,active) {
     });
     const transactions=saveBatch();
     advisor.memory.stalePlans(project.id);
-    const reply=`تمام، سجلت ${transactions.map(row=>`${transactionKindLabel(row.type)} بـ${Number(row.amount).toLocaleString('ar-EG')} جنيه`).join('، ')}.`;
+    const reply=`تمام، سجلت ${transactions.map(row=>`${transactionKindLabel(row.type)} بـ${Number(row.amount).toLocaleString('ar-EG')} جنيه${row.inventory_tracked===false?' (من غير تحديث المخزون)':''}`).join('، ')}.`;
     return {transactions,reply};
   }
   if(active.action_type==='reminder'){
@@ -617,7 +635,7 @@ async function commitPending(project,conversation,active) {
   }
   if(active.action_type==='project_fact'){
     const fact=upsertFact(project.id,payload.key,payload.value,'conversation');db.prepare('DELETE FROM pending_actions WHERE conversation_id=?').run(conversation.id);
-    return {fact,reply:'حفظت المعلومة في ذاكرة المشروع.'};
+    return {fact,reply:'تمام، هفتكر المعلومة دي للمشروع.'};
   }
   throw new Error('الطلب المعلق مش معروف.');
 }

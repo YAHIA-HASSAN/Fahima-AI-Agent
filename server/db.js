@@ -350,6 +350,28 @@ function migrate() {
       db.pragma('user_version = 9');
     })();
   }
+  if (db.pragma('user_version', { simple: true }) < 10) {
+    db.transaction(() => {
+      const transactionColumns = new Set(db.prepare('PRAGMA table_info(transactions)').all().map(column => column.name));
+      if (!transactionColumns.has('voided_at')) db.exec('ALTER TABLE transactions ADD COLUMN voided_at TEXT');
+      if (!transactionColumns.has('void_reason')) db.exec('ALTER TABLE transactions ADD COLUMN void_reason TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS transactions_active_project_idx ON transactions(project_id,voided_at,date DESC,id DESC);
+        CREATE TABLE IF NOT EXISTS transaction_audit (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+          action TEXT NOT NULL CHECK(action IN ('correction','undo')),
+          reason TEXT NOT NULL DEFAULT '',
+          before_json TEXT NOT NULL,
+          after_json TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS transaction_audit_scope_idx ON transaction_audit(project_id,transaction_id,created_at DESC);
+        PRAGMA user_version = 10;
+      `);
+    })();
+  }
   // Fail startup before workers are constructed if delivery's contract is ever damaged.
   const deliveryColumns = db.prepare('PRAGMA table_info(agent_task_deliveries)').all().map(column => column.name).sort();
   if (db.pragma('user_version', { simple: true }) < 9 || deliveryColumns.join(',') !== 'delivered_at,message_id,task_id') {

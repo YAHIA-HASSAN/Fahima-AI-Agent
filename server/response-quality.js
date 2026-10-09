@@ -2,12 +2,49 @@ const { normalizeDigits } = require('./finance');
 const { labels } = require('./memory');
 const terms = {...labels, memory:'معلومات المشروع',JSON:'تفاصيل داخلية',forecast:'تقدير للمستقبل',
   'break-even':'تغطية المصاريف',ROI:'استرجاع الفلوس',workflow:'خطوات الشغل','unit cost':'تكلفة القطعة'};
+const phrases=[
+  [/ده اقتراح لخطة بديلة[.،؛]?/gu,'دي فكرة تانية ممكنة للمشروع.'],
+  [/ومش هيتسجل كمصروف تدفعيه/gu,'ومش هسجله كمصروف اتدفع'],
+  [/لن يتم تسجيل هذا كمصروف/gu,'مش هسجله كمصروف'],
+  [/مطلوب استكمال البيانات/gu,'محتاج أعرف حاجة واحدة بس'],
+  [/يرجى توضيح المبلغ الإجمالي/gu,'المبلغ كله كام؟'],
+  [/المدخلات غير كافية/gu,'محتاجين معلومة كمان'],
+  [/تمت معالجة الطلب/gu,'خلصت طلبك'],
+  [/تم التحقق(?: من البيانات)?/gu,'راجعت البيانات'],
+  [/تكلفة الوحدة/gu,'سعر الواحدة'],
+  [/سعر الوحدة كام بالجنيه[؟?]?/gu,'سعر الواحدة كام؟'],
+  [/تاريخ العملية إيه[؟?]?/gu,'التاريخ إيه؟'],
+  [/العملية/gu,'الحركة'],
+  [/عملية مالية/gu,'حركة فلوس'],
+  [/وحدة الكمية إيه[؟?]?/gu,'بتتقاس بإيه؟'],
+  [/العملية دي مش موجودة/gu,'مش لاقي الحركة دي'],
+  [/تعذر إكمال بحث السوق دلوقتي/gu,'البحث مش شغال دلوقتي'],
+  [/حصلت مشكلة مؤقتة في المساعد\. جرب تاني أو اكتب طلبك بشكل أوضح\./gu,'حصلت مشكلة عندي. جرّب تاني بعد شوية.'],
+  [/بدأت أراجع المعلومات والأسعار والحسابات علشان أطلع نتيجة وخطة مناسبة\. هتظهر هنا أول ما تجهز\./gu,'ثانية وهقولك النتيجة.'],
+  [/بحث السوق اتأخر، فوقفت الانتظار\./gu,'البحث اتأخر.'],
+  [/الحساب الكامل محتاج بيانات مؤكدة أكتر؛ نقدر نبدأ بتقدير واضح الافتراضات أو نجمع عرض سعر بالتكلفة الكاملة\./gu,'الحساب محتاج معلومة كمان.'],
+  [/المصدر وتاريخ المراجعة ظاهرين في قسم بحث السوق\./gu,'هتلاقي المصدر وتاريخه تحت.'],
+  [/سجل المراجعة/gu,'سجل التعديلات'],
+  [/الخطة اجتازت المراجعة\./gu,'راجعت الخطة.'],
+  [/الخطة محفوظة كمبدئية مع توضيح ما يحتاج مراجعة\./gu,'حفظت الخطة كبداية، وفيه حاجات لسه محتاجة مراجعة.'],
+  [/المهمة محتاجة معلومة من المستخدم\./gu,'محتاج أعرف منك معلومة واحدة.'],
+  [/المهمة انتهت بحالة واضحة\./gu,'خلصت مراجعة الطلب.'],
+  [/مش هاعرض المهمة على إنها جاهزة/gu,'مش هقول إن النتيجة جاهزة'],
+  [/حالة واضحة/gu,'نتيجة واضحة'],
+];
 function cleanLanguage(text) {
   let result=String(text||'').trim();
   for(const [key,label] of Object.entries(terms)) {
     result=result.replace(new RegExp(`(?<![A-Za-z_])${key.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}(?![A-Za-z_])`,'gi'),label);
   }
+  for(const [pattern,replacement] of phrases)result=result.replace(pattern,replacement);
   return result.replace(/يا حبيبتي|يا حبيبي/gu,'').replace(/\s{2,}/g,' ').trim();
+}
+function simplifyResponse(text) {
+  let result=cleanLanguage(text).replace(/\n{3,}/gu,'\n\n');
+  const questions=[...result.matchAll(/[؟?]/gu)];
+  if(questions.length>1)result=result.slice(0,questions[0].index+1).trim();
+  return result;
 }
 function numbers(value, output=new Set()) {
   if(typeof value==='number'&&Number.isFinite(value))output.add(Math.round(value*100)/100);
@@ -16,9 +53,11 @@ function numbers(value, output=new Set()) {
   return output;
 }
 function validateText(text, {facts=[],calculations=[],goals=[],proposals=[],allowQuestion=false}={}) {
-  const clean=cleanLanguage(text);
+  const clean=simplifyResponse(text);
   const reasons=[];
   if(/```|\b(?:SELECT|INSERT|UPDATE|DELETE)\s|\{\s*"|\b\w+_\w+\b|tool_call|function\s*\(/iu.test(clean))reasons.push('internal_syntax');
+  if(/(?:المدخلات|قاعدة البيانات|مهمة Gemini|HTTP \d{3}|تمت معالجة الطلب|مطلوب استكمال البيانات)/iu.test(clean))reasons.push('internal_wording');
+  if(clean.length>420)reasons.push('too_long');
   if(/(?:ربح|مكسب|استثمار).{0,20}(?:مضمون|أكيد|مؤكد)|(?:مضمون|أكيد).{0,20}(?:ربح|مكسب)|هتكسب أكيد/u.test(clean))reasons.push('guarantee');
   if(/(?:صافي (?:الربح|ربح|المكسب|مكسب)|مكسبك|ربحك).{0,30}[\d٠-٩]/u.test(clean))reasons.push('unsupported_profit');
   if(/(?:السعر الحالي|سعر السوق|السوق دلوقتي).{0,35}[\d٠-٩].{0,10}جنيه/u.test(clean))reasons.push('unverified_market_price');
@@ -60,4 +99,4 @@ function calculationText(result) {
   };
   return prefix+(texts[result.type]?.()||'');
 }
-module.exports={cleanLanguage,validateText,chooseQuestion,calculationText};
+module.exports={cleanLanguage,simplifyResponse,validateText,chooseQuestion,calculationText};

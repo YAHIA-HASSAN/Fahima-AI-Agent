@@ -191,14 +191,14 @@ const deliveredAgentTaskMessages=new Set();
 function followAgentTask(taskId,projectId) {
   if(followedAgentTasks.has(taskId))return;
   followedAgentTasks.add(taskId);
-  const progress=addMessage('براجع الخطة والمعلومات…');
+  const progress=addMessage('ثانية وهقولك النتيجة…');
   const events=new EventSource(`/api/agent-tasks/${encodeURIComponent(taskId)}/events?projectId=${encodeURIComponent(projectId)}`);
   let finished=false;
   const finish=async update=>{
     if(finished||!['COMPLETE','PROVISIONAL','WAITING_FOR_INPUT','FAILED','CANCELLED'].includes(update.status))return;
     finished=true;followedAgentTasks.delete(taskId);events.close();progress.remove();
     if(update.status==='FAILED'||update.status==='CANCELLED') {
-      const failure=addMessage(update.result?.reply||update.error||(update.status==='CANCELLED'?'تم إيقاف المهمة.':'تعذر إكمال المهمة دلوقتي.'));
+      const failure=addMessage(update.result?.reply||update.error||(update.status==='CANCELLED'?'وقفت الطلب.':'حصلت مشكلة عندي. جرّب تاني بعد شوية.'));
       if(!update.result?.reply)failure.classList.add('error');
       return;
     }
@@ -212,7 +212,7 @@ function followAgentTask(taskId,projectId) {
       } catch {planLoadError=true;}
     }
     if(!deliveredAgentTaskMessages.has(taskId)) {
-      const message=planLoadError?'تعذر تحميل الخطة المحفوظة، لذلك مش هاعرض المهمة على إنها جاهزة. جرّب تحديث الصفحة.':result.reply;
+      const message=planLoadError?'مش قادر أفتح الخطة دلوقتي. حدّث الصفحة وجرب تاني.':result.reply;
       if(message)addMessage(message);
       deliveredAgentTaskMessages.add(taskId);
     }
@@ -365,12 +365,12 @@ function renderProfileStep() {
   if (plan) {
     html += '<details open><summary>' + escapeHtml(plan.title) + ' · نسخة ' + plan.revision + '</summary>';
     const planStatus=plan.body?.validation?.status||plan.status;
-    if(planStatus==='COMPLETE')html+='<p class="note">الخطة اجتازت مراجعة الاكتمال.</p>';
-    else if(planStatus==='PROVISIONAL')html+='<p class="note">الخطة مبدئية؛ راجع الافتراضات والنواقص قبل الاعتماد عليها.</p>';
-    else if(planStatus==='INVALID')html+='<p class="note">الخطة غير صالحة للاعتماد؛ الأرقام أو المدخلات تحتاج تصحيحًا.</p>';
-    else if(planStatus==='FAILED')html+='<p class="note">تعذر التحقق من الخطة الحالية.</p>';
-    if(plan.body.validation?.missing?.length)html+='<p class="note">محتاجين نراجع: '+escapeHtml(plan.body.validation.missing.join('، '))+'</p>';
-    if (plan.stale) html += '<p class="note">في معلومات اتغيرت. الخطة دي محتاجة مراجعة قبل الاعتماد عليها.</p>';
+    if(planStatus==='COMPLETE')html+='<p class="note">الخطة جاهزة بالمعلومات المتاحة.</p>';
+    else if(planStatus==='PROVISIONAL')html+='<p class="note">الخطة مبدئية. راجع الافتراضات والأسعار قبل ما تبدأ.</p>';
+    else if(planStatus==='INVALID')html+='<p class="note">فيه أرقام محتاجة مراجعة.</p>';
+    else if(planStatus==='FAILED')html+='<p class="note">مش قادر أراجع الخطة دلوقتي.</p>';
+    if(plan.body.validation?.missing?.length)html+='<p class="note">فيه حاجات لسه محتاجة مراجعة قبل ما تبدأ.</p>';
+    if (plan.stale) html += '<p class="note">معلومات المشروع اتغيرت. راجع الخطة قبل ما تبدأ.</p>';
     if (plan.change_reason) html += '<p class="note">سبب آخر تحديث: ' + escapeHtml(plan.change_reason) + '</p>';
     html += '<p>' + escapeHtml(plan.body.summary) + '</p>';
     for (const [key,label] of [['requirements','اللي محتاجينه'],['assumptions','افتراضات محتاجة مراجعة'],['risks','حاجات ناخد بالنا منها'],['indicators','هنعرف التقدم إزاي']]) {
@@ -411,7 +411,7 @@ $("#fact-form").onsubmit = async (e) => {
 $("#clear-facts").onclick = async () => {
   if (
     !confirm(
-      "هيتم مسح المعلومات المؤكدة من ذاكرة المشروع. المعاملات هتفضل زي ما هي. تكملي؟",
+      "همسح المعلومات المحفوظة عن المشروع، والمعاملات هتفضل زي ما هي. تكملي؟",
     )
   )
     return;
@@ -423,7 +423,7 @@ $("#clear-facts").onclick = async () => {
 $("#clear-conversation").onclick = async () => {
   if (
     !confirm(
-      "هيتم مسح رسائل المحادثة والطلب المعلق فقط. المعاملات وذاكرة المشروع هيفضلوا. تكملي؟",
+      "همسح رسايل المحادثة والطلب المعلّق بس. المعاملات ومعلومات المشروع هيفضلوا. تكملي؟",
     )
   )
     return;
@@ -454,7 +454,7 @@ $("#new-project").onclick = async () => {
 };
 $("#delete-project").onclick = async () => {
   const name = state?.project?.name || "المشروع الحالي";
-  if (!confirm(`هيتم حذف «${name}» وكل بياناته ومحادثاته ومخزونه نهائيًا. لا يمكن التراجع. متأكدة؟`)) return;
+  if (!confirm(`همسح مشروع «${name}» وكل بياناته ومحادثاته ومخزونه نهائيًا. مش هينفع نرجعه. متأكدة؟`)) return;
   const button = $("#delete-project");
   button.disabled = true;
   try {
@@ -797,7 +797,7 @@ function reportCanvas(report, rows, pageNumber, totalPages, isFirst) {
     );
     drawRtl(
       ctx,
-      "المجاميع تعكس البيانات المسجلة فقط. لا يتضمن التقرير حساب صافي الربح؛ فقد تظل المشتريات ضمن المخزون ولا تتوفر دائمًا تكلفة البضاعة المباعة.",
+      "الأرقام دي من الحركات المسجلة بس. التقرير مش بيحسب صافي المكسب؛ لأن تكلفة البضاعة اللي اتباعت ممكن ما تكونش معروفة.",
       1140,
       744,
       1050,
@@ -970,7 +970,7 @@ async function downloadReport(from = state.period.from, to = state.period.to) {
     a.remove();
     const panel = $("#report-panel");
     panel.hidden = false;
-    panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">تم تجهيز التقرير</p><h2>${escapeHtml(report.project.name)} · ${escapeHtml(report.period.from)} إلى ${escapeHtml(report.period.to)}</h2></div></div><p class="report-body">التقرير جاهز. إذا لم يبدأ تنزيله تلقائيًا، استخدمي الزر بالأسفل. يتضمن المجاميع المسجلة ولا يحسب صافي الربح.</p>`;
+    panel.innerHTML = `<div class="section-head"><div><p class="eyebrow">التقرير جاهز</p><h2>${escapeHtml(report.project.name)} · ${escapeHtml(report.period.from)} إلى ${escapeHtml(report.period.to)}</h2></div></div><p class="report-body">لو التقرير مانزلش لوحده، اضغط الزر اللي تحت. فيه مجموع الحركات المسجلة، ومش بيحسب صافي المكسب.</p>`;
     const fallback = document.createElement("a");
     fallback.className = "secondary report-download-link";
     fallback.href = url;

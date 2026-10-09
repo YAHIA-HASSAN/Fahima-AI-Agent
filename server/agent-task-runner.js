@@ -2,6 +2,7 @@ const { createHash } = require('node:crypto');
 const { extract } = require('./agent');
 const marketResearch = require('./market-research');
 const { validateBusinessPlan } = require('./plan-validator');
+const { simplifyResponse } = require('./response-quality');
 
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function toolOutcome({tool,invocationId,input,output,error,projectId,at=new Date().toISOString()}) {
@@ -202,7 +203,8 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
       const requiresPlan=task.type==='business_plan'||/خطة|business plan/i.test(`${task.objective} ${message}`);
       const effectiveStatus=validation?.taskStatus==='WAITING_FOR_INPUT'||validation?.status==='INVALID'||requiresPlan&&!plan&&status!=='FAILED'?'WAITING_FOR_INPUT':
         validation?.status==='PROVISIONAL'&&status==='COMPLETE'?'PROVISIONAL':(!plan&&status==='COMPLETE'?'WAITING_FOR_INPUT':status);
-      const result={taskId:task.id,status:effectiveStatus,reply:String(reply||'').slice(0,4500),speechText:String(reply||'').split('\n')[0],
+      const userReply=simplifyResponse(String(reply||'').slice(0,4500));
+      const result={taskId:task.id,status:effectiveStatus,reply:userReply,speechText:simplifyResponse(userReply.split('\n')[0]),
         plan:plan?{id:plan.id,projectId:Number(projectId),revision:plan.revision,title:plan.title,status:plan.status||validation?.status||'PROVISIONAL',stale:Boolean(plan.stale)}:null,
         planRef:plan?{planId:plan.id,projectId:Number(projectId),revision:plan.revision,status:plan.status||validation?.status||'PROVISIONAL'}:null,
         calculations:processed?.calculations||[],research:groupedResearch,
@@ -216,7 +218,7 @@ function createTaskRunner({db,advisor,config,contextFor,addMetric,extractDecisio
       control.metric('plan_quality_missing_sections',validation?.missing?.length||0,{status:validation?.status||status});
       control.metric('repeated_question',repeatedQuestion?1:0);
       result.status=effectiveStatus;
-      return {status:effectiveStatus,result,progress:effectiveStatus==='COMPLETE'?'الخطة اجتازت المراجعة.':effectiveStatus==='PROVISIONAL'?'الخطة محفوظة كمبدئية مع توضيح ما يحتاج مراجعة.':effectiveStatus==='WAITING_FOR_INPUT'?'المهمة محتاجة معلومة من المستخدم.':'المهمة انتهت بحالة واضحة.'};
+      return {status:effectiveStatus,result,progress:effectiveStatus==='COMPLETE'?'الخطة جاهزة بالمعلومات المتاحة.':effectiveStatus==='PROVISIONAL'?'الخطة مبدئية، وفيه حاجات لسه محتاجة مراجعة.':effectiveStatus==='WAITING_FOR_INPUT'?'محتاج أعرف منك معلومة واحدة.':'خلصت مراجعة الطلب.'};
     }
     try {
       let round=0;

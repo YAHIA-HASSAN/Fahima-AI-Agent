@@ -9,10 +9,12 @@ function createBusinessRoutes({ app, db, business, validDate, projectOr404, requ
     if (!project) return;
     const row = db.prepare('SELECT * FROM transactions WHERE id=? AND project_id=?').get(Number(req.params.id), project.id);
     if (!row) return res.status(404).json({ error: 'العملية دي مش موجودة.' });
-    const hasItems = db.prepare('SELECT 1 FROM transaction_items WHERE transaction_id=? LIMIT 1').get(row.id);
-    if (hasItems) return res.status(409).json({ error: 'العملية مرتبطة بحركة مخزون؛ لا يمكن حذفها حاليًا حتى لا تختلف الكميات المسجلة.' });
-    db.prepare('DELETE FROM transactions WHERE id=? AND project_id=?').run(row.id, project.id);
-    res.json({ ok: true });
+    try {
+      business.voidTransaction(project.id,row.id,'إلغاء من سجل المعاملات');
+      res.json({ ok: true, voided: true });
+    } catch(error) {
+      res.status(409).json({ error: error.message });
+    }
   });
 
   app.get('/api/products', (req, res) => {

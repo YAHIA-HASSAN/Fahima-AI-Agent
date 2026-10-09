@@ -32,7 +32,7 @@ function getConversation(projectId, conversationId) {
   return db.prepare('SELECT * FROM conversations WHERE id=? AND project_id=?').get(Number(conversationId),projectId) || null;
 }
 function getTransactions(projectId, from, to) {
-  return db.prepare('SELECT * FROM transactions WHERE project_id=? AND date>=? AND date<=? ORDER BY date DESC,id DESC').all(projectId,from,to);
+  return db.prepare('SELECT * FROM transactions WHERE project_id=? AND voided_at IS NULL AND date>=? AND date<=? ORDER BY date DESC,id DESC').all(projectId,from,to);
 }
 function periodBounds(period = 'today', date = new Date()) {
   const end = localDate(date);
@@ -86,12 +86,15 @@ function recordTransaction(projectId, input) {
   if (x.productName && !x.description.includes(x.productName)) x.description = `${x.productName}: ${x.description}`.slice(0,180);
   const transact = db.transaction(() => {
     let product = hasDetails ? findProduct(projectId,x.productName,x.unit) : null;
-    if (hasDetails && !product && x.type === 'income') throw new Error('المنتج مش مضاف للمخزون. أضفه أولًا أو سجل البيع من غير تحديث المخزون.');
+    let inventoryTracked = true;
+    if (hasDetails && x.type === 'income' && !product) inventoryTracked = false;
     if (hasDetails && !product) product = createProduct(projectId,{name:x.productName,unit:x.unit,initialQuantity:0});
-    if (product && x.type === 'income' && product.current_quantity < qty) throw new Error(`المخزون المسجل من ${product.name} هو ${product.current_quantity} ${product.unit}. قلل الكمية أو سجل البيع من غير تحديث المخزون.`);
+    if (product && x.type === 'income' && product.current_quantity < qty) inventoryTracked = false;
     const row = db.prepare('INSERT INTO transactions(project_id,type,amount,date,description,estimated) VALUES(?,?,?,?,?,?)').run(projectId,x.type,x.amount,x.date,x.description,x.estimated?1:0);
     if (product) {
       db.prepare('INSERT INTO transaction_items(transaction_id,product_id,quantity,unit,unit_price,line_total) VALUES(?,?,?,?,?,?)').run(row.lastInsertRowid,product.id,qty,product.unit,unitPrice,x.amount);
+    }
+    if (product && inventoryTracked) {
       const isSale = x.type === 'income';
       db.prepare('INSERT INTO inventory_movements(project_id,product_id,type,quantity,delta,reference_type,reference_id,description) VALUES(?,?,?,?,?,?,?,?)').run(projectId,product.id,isSale?'sale':'purchase',qty,isSale?-qty:qty,'transaction',row.lastInsertRowid,x.description);
       if (isSale) db.prepare("UPDATE products SET current_quantity=current_quantity-?,updated_at=datetime('now') WHERE id=? AND project_id=?").run(qty,product.id,projectId);
@@ -102,9 +105,81 @@ function recordTransaction(projectId, input) {
         db.prepare("UPDATE products SET current_quantity=current_quantity+?,unit_cost=?,updated_at=datetime('now') WHERE id=? AND project_id=?").run(qty,avgCost,product.id,projectId);
       }
     }
-    return db.prepare('SELECT * FROM transactions WHERE id=? AND project_id=?').get(row.lastInsertRowid,projectId);
+    return {...db.prepare('SELECT * FROM transactions WHERE id=? AND project_id=?').get(row.lastInsertRowid,projectId),inventory_tracked:inventoryTracked};
   });
   return transact();
+}
+function transactionSnapshot(projectId, transactionId) {
+  const transaction=db.prepare('SELECT * FROM transactions WHERE id=? AND project_id=?').get(transactionId,projectId);
+  if(!transaction)return null;
+  const items=db.prepare(`SELECT i.*,p.name AS product_name,p.current_quantity FROM transaction_items i
+    JOIN products p ON p.id=i.product_id WHERE i.transaction_id=?`).all(transactionId);
+  return {transaction,items};
+}
+function correctTransaction(projectId, transactionId, changes, reason='تصحيح من المستخدم') {
+  const apply=db.transaction(()=>{
+    const before=transactionSnapshot(projectId,transactionId);
+    if(!before||before.transaction.voided_at)throw new Error('العملية المقصودة مش موجودة أو اتلغت قبل كده.');
+    const row=before.transaction,item=before.items[0]||null;
+    const allowed={amount:changes.amount,date:changes.date,description:changes.description};
+    if(allowed.date!==undefined&&!validDate(allowed.date))throw new Error('تاريخ التصحيح غير صحيح.');
+    if(allowed.amount!==undefined&&(!Number.isFinite(allowed.amount)||allowed.amount<=0))throw new Error('المبلغ لازم يكون أكبر من صفر.');
+    if(allowed.description!==undefined)allowed.description=String(allowed.description).trim().slice(0,180);
+    let qty=item?.quantity??null,unitPrice=item?.unit_price??null,total=allowed.amount??row.amount;
+    if(item&&(changes.quantity!=null||changes.unit_price!=null)){
+      qty=changes.quantity==null?qty:Number(changes.quantity);
+      if(!Number.isFinite(qty)||qty<=0)throw new Error('الكمية لازم تكون أكبر من صفر.');
+      if(changes.unit_price!=null){unitPrice=Number(changes.unit_price);if(!Number.isFinite(unitPrice)||unitPrice<=0)throw new Error('سعر الوحدة لازم يكون أكبر من صفر.');total=Math.round(qty*unitPrice*100)/100;}
+      else if(changes.amount==null)total=Math.round(qty*unitPrice*100)/100;
+      unitPrice=total/qty;
+      const delta=qty-item.quantity,product=db.prepare('SELECT * FROM products WHERE id=? AND project_id=?').get(item.product_id,projectId);
+      const tracked=db.prepare("SELECT 1 FROM inventory_movements WHERE project_id=? AND reference_type='transaction' AND reference_id=?").get(projectId,transactionId);
+      if(tracked){
+        const newStock=product.current_quantity+(row.type==='income'?-delta:delta);
+        if(newStock<0)throw new Error('التصحيح هيخلي رصيد المخزون بالسالب؛ راجع الحركات اللي اتسجلت بعد العملية.');
+        db.prepare("UPDATE products SET current_quantity=?,updated_at=datetime('now') WHERE id=? AND project_id=?").run(newStock,product.id,projectId);
+        db.prepare("UPDATE inventory_movements SET quantity=?,delta=?,description=? WHERE project_id=? AND reference_type='transaction' AND reference_id=?")
+          .run(qty,row.type==='income'?-qty:qty,allowed.description??row.description,projectId,transactionId);
+      }
+      db.prepare('UPDATE transaction_items SET quantity=?,unit_price=?,line_total=? WHERE transaction_id=? AND product_id=?')
+        .run(qty,unitPrice,total,transactionId,item.product_id);
+    } else if(item&&allowed.amount!==undefined) {
+      unitPrice=total/item.quantity;
+      db.prepare('UPDATE transaction_items SET unit_price=?,line_total=? WHERE transaction_id=?').run(unitPrice,total,transactionId);
+    }
+    db.prepare('UPDATE transactions SET amount=?,date=?,description=? WHERE id=? AND project_id=? AND voided_at IS NULL')
+      .run(total,allowed.date??row.date,allowed.description??row.description,transactionId,projectId);
+    const after=transactionSnapshot(projectId,transactionId);
+    db.prepare("INSERT INTO transaction_audit(project_id,transaction_id,action,reason,before_json,after_json) VALUES(?,?,'correction',?,?,?)")
+      .run(projectId,transactionId,String(reason).slice(0,300),JSON.stringify(before),JSON.stringify(after));
+    return after.transaction;
+  });
+  return apply();
+}
+function voidTransaction(projectId, transactionId, reason='إلغاء بطلب المستخدم') {
+  const apply=db.transaction(()=>{
+    const before=transactionSnapshot(projectId,transactionId);
+    if(!before||before.transaction.voided_at)throw new Error('العملية دي مش موجودة أو اتلغت قبل كده.');
+    const row=before.transaction;
+    for(const item of before.items){
+      const tracked=db.prepare("SELECT 1 FROM inventory_movements WHERE project_id=? AND reference_type='transaction' AND reference_id=?").get(projectId,transactionId);
+      if(!tracked)continue;
+      const delta=row.type==='income'?item.quantity:-item.quantity;
+      const product=db.prepare('SELECT current_quantity FROM products WHERE id=? AND project_id=?').get(item.product_id,projectId);
+      const stock=Number(product?.current_quantity)+delta;
+      if(stock<0)throw new Error('ماقدرش ألغي الشراء لأن جزء من الكمية اتصرف بالفعل. راجع الحركة الأول.');
+      db.prepare("UPDATE products SET current_quantity=?,updated_at=datetime('now') WHERE id=? AND project_id=?").run(stock,item.product_id,projectId);
+      db.prepare("INSERT INTO inventory_movements(project_id,product_id,type,quantity,delta,reference_type,reference_id,description) VALUES(?,?,'adjustment',?,?,'transaction_undo',?,?)")
+        .run(projectId,item.product_id,item.quantity,delta,transactionId,String(reason).slice(0,180));
+    }
+    db.prepare('UPDATE transactions SET voided_at=datetime(\'now\'),void_reason=? WHERE id=? AND project_id=? AND voided_at IS NULL')
+      .run(String(reason).slice(0,300),transactionId,projectId);
+    const after=transactionSnapshot(projectId,transactionId);
+    db.prepare("INSERT INTO transaction_audit(project_id,transaction_id,action,reason,before_json,after_json) VALUES(?,?,'undo',?,?,?)")
+      .run(projectId,transactionId,String(reason).slice(0,300),JSON.stringify(before),JSON.stringify(after));
+    return after.transaction;
+  });
+  return apply();
 }
 function adjustInventory(projectId, productId, target, description = 'تسوية يدوية') {
   const quantity = Number(target); if (!Number.isFinite(quantity)||quantity<0) throw new Error('اكتب كمية صحيحة تساوي صفر أو أكثر.');
@@ -124,7 +199,7 @@ function getProductSales(projectId, from, to) {
   return db.prepare(`SELECT p.id,p.name,p.unit,SUM(i.quantity) AS quantity,COUNT(DISTINCT t.id) AS sale_count,
     SUM(i.line_total) AS sales_amount FROM transaction_items i
     JOIN transactions t ON t.id=i.transaction_id AND t.type='income' AND t.date>=? AND t.date<=?
-    JOIN products p ON p.id=i.product_id WHERE p.project_id=? GROUP BY p.id ORDER BY quantity DESC`).all(from,to,projectId);
+    JOIN products p ON p.id=i.product_id WHERE p.project_id=? AND t.voided_at IS NULL GROUP BY p.id ORDER BY quantity DESC`).all(from,to,projectId);
 }
 function addReminder(projectId, title, dueAt) {
   const cleanTitle=String(title||'').trim().slice(0,160); const date=String(dueAt||'');
@@ -134,4 +209,4 @@ function addReminder(projectId, title, dueAt) {
 function getReminders(projectId) {
   return db.prepare('SELECT * FROM reminders WHERE project_id=? AND completed=0 ORDER BY due_at,id').all(projectId);
 }
-module.exports = { db, TYPES, localDate, getProject, ensureConversation, getConversation, getTransactions, periodBounds, getSummary, formatSummary, getProducts, createProduct, findProduct, recordTransaction, adjustInventory, getProductSales, addReminder, getReminders };
+module.exports = { db, TYPES, localDate, getProject, ensureConversation, getConversation, getTransactions, periodBounds, getSummary, formatSummary, getProducts, createProduct, findProduct, recordTransaction, transactionSnapshot, correctTransaction, voidTransaction, adjustInventory, getProductSales, addReminder, getReminders };

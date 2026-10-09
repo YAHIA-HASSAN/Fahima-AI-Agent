@@ -73,12 +73,13 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       await freshConversation();
       const pending = await chat({ intent: 'record_transaction', transaction_type: 'stock_cost', amount: 100,
         amount_kind: 'total', product_name: productName, quantity: 3, unit, description: 'شراء جديد' });
-      assert.equal(pending.body.kind, 'confirm');
-      assert.equal(count('transactions'), 0);
-      assert.equal(count('products'), 0);
-      const result = await confirm();
+      assert.equal(pending.body.kind, 'saved');
+      assert.equal(count('transactions'), 1);
+      assert.equal(count('products'), 1);
+      const result = pending;
       assert.equal(result.body.kind, 'saved');
       assert.equal(result.body.transaction.amount, 100);
+      assert.equal(result.body.reply,'تمام، سجلت شراء بضاعة بـ١٠٠ جنيه.');
       assert.equal(result.body.transaction.project_id, projectId);
       assert.equal(B.getProducts(first.id).length, 0);
       const product = B.getProducts(projectId)[0];
@@ -105,8 +106,7 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
     await t.test('total-only purchase stores its name without inventing stock quantity', async () => {
       await freshConversation();
       const name = randomUUID();
-      await chat({ intent: 'record_transaction', transaction_type: 'stock_cost', product_name: name, amount: 217, amount_kind: 'total', description: 'شراء' });
-      const saved = await confirm();
+      const saved = await chat({ intent: 'record_transaction', transaction_type: 'stock_cost', product_name: name, amount: 217, amount_kind: 'total', description: 'شراء' });
       assert.equal(saved.body.transaction.amount, 217);
       assert.ok(saved.body.transaction.description.includes(name));
       assert.equal(count('products'), 1);
@@ -122,11 +122,8 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       const premature = await api(`/api/pending-actions/${result.body.pending.id}/confirm`, { projectId, conversationId });
       assert.equal(premature.status, 409);
       result = await chat({ intent: 'record_transaction', unit: 'وحدة من رسالة المستخدم' });
-      assert.equal(result.body.kind, 'confirm');
-      const before = count('transactions');
-      const tampered = await api(`/api/pending-actions/${result.body.pending.id}/confirm`, { projectId, conversationId, changes: { amount: 9000 } });
-      assert.equal(tampered.status, 400);
-      assert.equal(count('transactions'), before);
+      assert.equal(result.body.kind, 'saved');
+      assert.equal(result.body.transaction.amount, 60);
       await freshConversation();
       result = await chat({ intent: 'record_transaction', transaction_type: 'stock_cost', amount: 10,
         amount_kind: 'total', product_name: randomUUID(), quantity: 0 });
@@ -153,10 +150,9 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       const products = count('products');
       const result = await chat({ intent: 'record_transactions', transactions: [
         tx({ product_name: randomUUID(), quantity: 2, unit: randomUUID() }),
-        tx({ transaction_type: 'income', product_name: randomUUID(), quantity: 1, unit: randomUUID() }),
+        tx({ transaction_type: 'income', amount: 0, product_name: randomUUID(), quantity: 1, unit: randomUUID() }),
       ] });
-      assert.equal(result.body.kind, 'confirm');
-      assert.equal((await confirm()).body.kind, 'clarify');
+      assert.equal(result.body.kind, 'clarify');
       assert.equal(count('transactions'), before);
       assert.equal(count('products'), products);
     });
@@ -179,14 +175,23 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       assert.equal(db.prepare('SELECT COUNT(*) n FROM pending_actions WHERE conversation_id=?').get(conversationId).n, 0);
     });
 
-    await t.test('corrected amounts replace derived unit prices before reconfirmation', async () => {
+    await t.test('incomplete unit price is resolved from the next answer and recorded without confirmation', async () => {
       await freshConversation();
-      await chat({ intent: 'record_transaction', transaction_type: 'stock_cost', amount: 100,
-        amount_kind: 'total', product_name: randomUUID(), quantity: 3, unit: randomUUID() });
-      const updated = await chat({ intent: 'record_transaction', amount: 150, amount_kind: 'total' }, 'صححي المبلغ');
-      assert.equal(updated.body.kind, 'confirm');
-      assert.equal(updated.body.pending.payload.unitPrice, 50);
-      assert.equal((await confirm()).body.transaction.amount, 150);
+      const product = `بيض ${randomUUID()}`;
+      const unit = `بيضة ${randomUUID().slice(0,8)}`;
+      const incomplete = await chat({ intent: 'record_transaction', transaction_type: 'income', amount: null,
+        product_name: product, quantity: 5, unit }, 'أنا بعت ٥ بيضات');
+      assert.equal(incomplete.body.kind, 'clarify');
+      assert.equal(incomplete.body.pending.payload.waiting_for, 'unit_price');
+      assert.equal(incomplete.body.reply, `٥ ${unit} ${product} اتباعوا بكام كلهم؟`);
+      assert.equal((incomplete.body.reply.match(/[؟?]/gu)||[]).length,1);
+      next = interpreted({ intent: 'record_transaction', transaction_type: null, amount: 5 });
+      const completed = await api('/api/chat', { projectId, conversationId, message: '٥', requestId: randomUUID() });
+      assert.equal(completed.body.kind, 'saved');
+      assert.equal(completed.body.transaction.amount, 25);
+      assert.equal(db.prepare('SELECT quantity FROM transaction_items WHERE transaction_id=?').get(completed.body.transaction.id).quantity, 5);
+      assert.match(completed.body.reply,/٢٥/u);
+      assert.equal(completed.body.transaction.inventory_tracked,false);
     });
 
     await t.test('unit price alone needs quantity, and impossible dates are not replaced with today', async () => {
@@ -195,8 +200,8 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
         amount_kind: 'unit_price', product_name: randomUUID(), unit: randomUUID() });
       assert.equal(result.body.pending.payload.waiting_for, 'quantity');
       result = await chat({ intent: 'record_transaction', quantity: 4 });
-      assert.equal(result.body.kind, 'confirm');
-      assert.equal(result.body.pending.payload.amount, 80);
+      assert.equal(result.body.kind, 'saved');
+      assert.equal(result.body.transaction.amount, 80);
       await freshConversation();
       result = await chat({ intent: 'record_transaction', transaction_type: 'operating_expense', amount: 15,
         amount_kind: 'total', date: '2026-02-30' });
@@ -206,14 +211,32 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       assert.equal(result.body.kind, 'clarify');
     });
 
-    await t.test('confirmed batch saves every operation and repeated request IDs do not duplicate it', async () => {
+    await t.test('unambiguous correction and undo are audited and update reports without deleting history', async () => {
+      await freshConversation();
+      const name=`بيض ${randomUUID()}`,unit=`بيضة ${randomUUID().slice(0,8)}`;
+      const sale=await chat({intent:'record_transaction',transaction_type:'income',amount:25,amount_kind:'total',
+        product_name:name,quantity:5,unit,description:'بيع بيض'});
+      next=interpreted({intent:'correct_transaction',transaction_type:'income',product_name:name,amount:30,amount_kind:'total',quantity:5,unit,description:'تصحيح البيع'});
+      const corrected=await api('/api/chat',{projectId,conversationId,message:'البيض كان بـ٦ للواحدة',requestId:randomUUID()});
+      assert.equal(corrected.body.kind,'saved');assert.equal(corrected.body.reply.includes('٣٠'),true);
+      assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').get(sale.body.transaction.id).amount,30);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM transaction_audit WHERE transaction_id=? AND action=?').get(sale.body.transaction.id,'correction').n,1);
+      next=interpreted({intent:'undo_transaction',transaction_type:'income',product_name:name,transaction_reference:'latest'});
+      const undone=await api('/api/chat',{projectId,conversationId,message:'امسحي آخر عملية بيض',requestId:randomUUID()});
+      assert.equal(undone.body.kind,'saved');
+      assert.equal(db.prepare('SELECT voided_at FROM transactions WHERE id=?').get(sale.body.transaction.id).voided_at!==null,true);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM transaction_audit WHERE transaction_id=? AND action=?').get(sale.body.transaction.id,'undo').n,1);
+      assert.equal(B.getTransactions(projectId,'0001-01-01',B.localDate()).some(row=>row.id===sale.body.transaction.id),false);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE id=?').get(sale.body.transaction.id).n,1);
+    });
+
+    await t.test('completed batch saves every operation immediately and duplicate request IDs do not duplicate it', async () => {
       await freshConversation();
       const item = (type, amount) => ({ transaction_type: type, amount, amount_kind: 'total', date: B.localDate(),
         description: randomUUID(), estimated: false, product_name: null, quantity: null, unit: null, unit_price: null });
       const before = count('transactions');
-      await chat({ intent: 'record_transactions', transactions: [item('income', 85), item('operating_expense', 17)] });
-      assert.equal(count('transactions'), before);
-      const body = { projectId, conversationId, message: 'أيوه', requestId: randomUUID() };
+      const body = { projectId, conversationId, message: 'تم بيع ٨٥ جنيه ودفع ١٧ جنيه مصروف', requestId: randomUUID() };
+      next=interpreted({ intent: 'record_transactions', transactions: [item('income', 85), item('operating_expense', 17)] });
       const saved = await api('/api/chat', body);
       assert.equal(saved.body.transactions.length, 2);
       assert.equal(count('transactions'), before + 2);
@@ -222,15 +245,14 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
       assert.equal(count('transactions'), before + 2);
     });
 
-    await t.test('reminder details persist between messages and require confirmation', async () => {
+    await t.test('reminder asks for missing details then saves the requested reminder directly', async () => {
       await freshConversation();
       const title = randomUUID();
       let result = await chat({ intent: 'create_reminder', reminder_title: title });
       assert.equal(result.body.kind, 'clarify');
       assert.equal(count('reminders'), 0);
       result = await chat({ intent: 'create_reminder', due_date: B.localDate() });
-      assert.equal(result.body.kind, 'confirm');
-      await confirm();
+      assert.equal(result.body.kind, 'saved');
       assert.equal(B.getReminders(projectId)[0].title, title);
       assert.equal(B.getReminders(first.id).length, 0);
     });

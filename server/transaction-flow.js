@@ -11,23 +11,33 @@ function periodLabel(period) {
 }
 
 function questionForPending(pending) {
-  return ({
-    transaction_type: 'دي كانت فلوس بيع، ولا شراء بضاعة، ولا مصروف؟', amount: 'المبلغ كام بالجنيه؟',
-    product_name: 'اسم البضاعة إيه؟', quantity: 'الكمية كام؟', unit: 'وحدة الكمية إيه؟',
-    date: 'تاريخ العملية إيه؟', amount_kind: 'المبلغ ده إجمالي العملية ولا سعر الوحدة؟',
-    unit_price: 'سعر الوحدة كام؟', due_date: 'تحب أذكرك إمتى؟', reminder_title: 'أفكرك تعملي إيه؟',
-    markup_percent: 'تحب تزودي كام على التكلفة؟',
-  })[pending.waiting_for] || 'ممكن توضحيلي حاجة واحدة كمان؟';
+  const prompts={
+    transaction_type:'دي فلوس بيع، ولا شراء، ولا مصروف؟', amount:'المبلغ كله كام؟', unit_price:'سعر الواحدة كام؟',
+    product_name:'اسم البضاعة إيه؟', quantity:'الكمية كام؟', unit:'الكمية بتتقاس بإيه؟',
+    date:'كان إمتى؟', amount_kind:'المبلغ ده كله ولا سعر الواحدة؟', due_date:'أفكرك يوم إيه؟', reminder_title:'أفكرك تعملي إيه؟',
+    markup_percent:'تحب تزود كام على التكلفة؟',
+  };
+  const question=prompts[pending.waiting_for]||'محتاج أعرف حاجة واحدة بس. إيه هي؟';
+  if(pending.waiting_for==='unit_price'&&pending.quantity&&pending.productName)return `${Number(pending.quantity).toLocaleString('ar-EG')} ${pending.unit||''} ${pending.productName} اتباعوا بكام كلهم؟`.replace(/\s+/gu,' ').trim();
+  return question;
 }
 
 function mergePendingTransaction(pending, parsed) {
   const next = { ...pending };
+  // A short reply answers the exact slot we just requested. Keep that link
+  // deterministic; Gemini still decides whether this message belongs here.
+  if (pending.waiting_for === 'unit_price' && parsed.amount != null && parsed.unit_price == null) {
+    next.unitPrice = parsed.amount;
+    next.amount = null;
+    next.amountKind = 'unit_price';
+  }
   if (parsed.unit_price == null && pending.amountKind === 'total' && (parsed.amount != null || parsed.quantity != null)) next.unitPrice = null;
   for (const [key, value] of Object.entries({
     type: parsed.transaction_type, amount: parsed.amount, date: parsed.date, description: parsed.description,
     estimated: parsed.estimated, productName: parsed.product_name, quantity: parsed.quantity, unit: parsed.unit,
     unitPrice: parsed.unit_price, amountKind: parsed.amount_kind,
   })) {
+    if (pending.waiting_for === 'unit_price' && key === 'amount' && parsed.unit_price == null) continue;
     if (value !== null && value !== undefined && value !== '' && !(key === 'estimated' && value === false)) next[key] = value;
   }
   delete next.waiting_for;
@@ -67,6 +77,7 @@ function transactionPending(parsed, existing, raw) {
   else if (!validDate(item.date)) missing = 'date';
   else if (item.quantity != null && (!Number.isFinite(item.quantity) || item.quantity <= 0)) missing = 'quantity';
   else if (item.amountKind === 'unit_price' && item.quantity == null) missing = 'quantity';
+  else if (item.quantity != null && item.amount == null && item.unitPrice == null) missing = 'unit_price';
   else if (item.quantity != null && item.amount != null && !item.amountKind && item.unitPrice == null) missing = 'amount_kind';
   else if (item.quantity != null && !item.productName) missing = 'product_name';
   else if (item.productName && item.quantity != null && !item.unit) missing = 'unit';
@@ -76,11 +87,12 @@ function transactionPending(parsed, existing, raw) {
 
   if (missing) {
     item.waiting_for = missing;
-    return { status: 'waiting_for_details', payload: item, reply: questionForPending(item) };
+    const question=String(parsed.question?.text||'').trim();
+    return { status: 'waiting_for_details', payload: item, reply: question.slice(0,300)||questionForPending(item) };
   }
   delete item.waiting_for;
   const product = item.productName ? ` ${[item.quantity, item.unit, item.productName].filter(value => value != null && value !== '').join(' ')}` : '';
-  return { status: 'awaiting_confirmation', payload: item, reply: `فهمت: ${transactionKindLabel(item.type)}${product} بـ${Number(item.amount).toLocaleString('ar-EG')} جنيه. أسجلها؟ قول «أيوه» أو «إلغاء».` };
+  return { status: 'ready', payload: item, reply: `تمام، سجلت ${transactionKindLabel(item.type)}${product} بـ${Number(item.amount).toLocaleString('ar-EG')} جنيه.` };
 }
 
 function transactionBatchPending(items, active, raw, followup = null) {
@@ -99,7 +111,7 @@ function transactionBatchPending(items, active, raw, followup = null) {
       unit: followup?.unit ?? item.unit, unit_price: followup?.unit_price ?? item.unitPrice,
     }, { action_type: 'transaction', payload: item }, raw);
     batch[startAt] = updated.payload;
-    if (updated.status !== 'awaiting_confirmation') return { status: 'waiting_for_details', payload: { transactions: batch, waitingIndex: startAt }, reply: `بالنسبة لـ${transactionKindLabel(item.type)}: ${updated.reply}` };
+    if (updated.status !== 'ready') return { status: 'waiting_for_details', payload: { transactions: batch, waitingIndex: startAt }, reply: `بالنسبة لـ${transactionKindLabel(item.type)}: ${updated.reply}` };
     startAt += 1;
   }
   for (let index = startAt; index < batch.length; index += 1) {
@@ -110,10 +122,10 @@ function transactionBatchPending(items, active, raw, followup = null) {
       quantity: item.quantity, unit: item.unit, unit_price: item.unitPrice,
     }, { action_type: 'transaction', payload: item }, '');
     batch[index] = normalized.payload;
-    if (normalized.status !== 'awaiting_confirmation') return { status: 'waiting_for_details', payload: { transactions: batch, waitingIndex: index }, reply: `بالنسبة لـ${transactionKindLabel(item.type)}: ${normalized.reply}` };
+    if (normalized.status !== 'ready') return { status: 'waiting_for_details', payload: { transactions: batch, waitingIndex: index }, reply: `بالنسبة لـ${transactionKindLabel(item.type)}: ${normalized.reply}` };
   }
   const preview = batch.map((item, index) => `${index + 1}) ${transactionKindLabel(item.type)} ${[item.quantity, item.unit, item.productName].filter(value => value != null && value !== '').join(' ')}: ${Number(item.amount).toLocaleString('ar-EG')} جنيه`).join('، ');
-  return { status: 'awaiting_confirmation', payload: { transactions: batch }, reply: `فهمت العمليات دي: ${preview}. أحفظهم كلهم؟ قول «أيوه» أو «إلغاء».` };
+  return { status: 'ready', payload: { transactions: batch }, reply: `تمام، سجلت العمليات دي: ${preview}.` };
 }
 
 module.exports = { parsePeriod, periodLabel, transactionKindLabel, transactionPending, transactionBatchPending };
