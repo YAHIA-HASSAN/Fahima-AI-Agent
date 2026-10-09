@@ -8,13 +8,13 @@
   <header class="topbar"><button id="menu" class="icon-button" aria-label="القائمة">☰</button><div class="brand"><span class="mark">ف</span><span><strong>فهيمة</strong><small id="projectName">مستشارة مشروعك</small></span></div><span id="health" class="status-dot" aria-label="جاهزة">●</span></header>
   <main>
     <aside id="sidebar" class="sidebar" aria-label="أدوات المشروع">
-      <label for="projects">مشروعاتي</label><select id="projects"></select><button id="newProject" class="outline-button">＋ مشروع جديد</button>
+      <label for="projects">مشروعاتي</label><select id="projects"></select><button id="newProject" class="outline-button">＋ مشروع جديد</button><button id="deleteProject" class="danger-button">حذف المشروع</button>
       <button id="planToggle" class="side-link" aria-expanded="false">الخطة <span>⌄</span></button>
       <section id="planPanel" class="collapsed"><div id="plan">مفيش خطة محفوظة لسه.</div></section>
       <button id="recordsToggle" class="side-link" aria-expanded="false">المبيعات والمصاريف <span>⌄</span></button>
       <section id="recordsPanel" class="collapsed"><div id="transactions">مفيش معاملات مسجلة.</div></section>
       <button id="reportToggle" class="side-link" aria-expanded="false">التقارير <span>⌄</span></button>
-      <section id="reportPanel" class="collapsed"><label>من <input id="reportFrom" type="date"></label><label>إلى <input id="reportTo" type="date"></label><button id="loadReport" class="outline-button">اعرضي التقرير</button><div id="report"></div></section>
+      <section id="reportPanel" class="collapsed"><label>من <input id="reportFrom" type="date"></label><label>إلى <input id="reportTo" type="date"></label><button id="loadReport" class="outline-button">اعرضي التقرير</button><button id="downloadReport" class="outline-button">تحميل PDF</button><div id="report"></div></section>
     </aside>
     <section class="chat" aria-label="محادثة فهيمة"><div id="messages" aria-live="polite"></div><div class="composer"><button id="voice" class="round-button" aria-label="تحدثي مع فهيمة">🎙</button><textarea id="input" rows="1" placeholder="اكتبي أو احكيلي عن مشروعك…"></textarea><button id="send" class="send-button">إرسال</button></div><div class="audio-bar"><button id="playReply" hidden>🔊 اسمعي الرد</button><button id="pauseReply" hidden>⏸ إيقاف مؤقت</button><button id="stopReply" hidden>⏹ إيقاف</button><button id="cancelTask" hidden>إلغاء المهمة</button><small id="status" aria-live="polite"></small></div></section>
   </main><script src="/app.js" defer></script>

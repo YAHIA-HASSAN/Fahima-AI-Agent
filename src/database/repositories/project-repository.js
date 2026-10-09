@@ -8,6 +8,12 @@ function createProjectRepository(db) {
       const result = db.prepare('INSERT INTO projects(name) VALUES(?)').run(clean);
       return this.get(result.lastInsertRowid);
     },
+    remove(id) {
+      const project = this.get(id);
+      if (!project) throw Object.assign(new Error('المشروع غير موجود.'), { status: 404 });
+      db.prepare('DELETE FROM projects WHERE id=?').run(Number(id));
+      return project;
+    },
   };
 }
 module.exports = { createProjectRepository };

@@ -158,10 +158,55 @@ function ensureRuntimeTables(db) {
       plan_revision INTEGER, metric TEXT NOT NULL, planned_value TEXT, actual_value TEXT NOT NULL,
       note TEXT, idempotency_key TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS fahima_v2_customers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, phone TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id,name)
+    );
+    CREATE TABLE IF NOT EXISTS fahima_v2_sales (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id), customer_id INTEGER REFERENCES fahima_v2_customers(id),
+      product_id INTEGER REFERENCES products(id), quantity REAL, unit_price REAL NOT NULL,
+      amount REAL NOT NULL, paid_amount REAL NOT NULL DEFAULT 0, sale_kind TEXT NOT NULL CHECK(sale_kind IN ('cash','credit')),
+      effective_date TEXT NOT NULL, source_message_id INTEGER REFERENCES messages(id), created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id,transaction_id)
+    );
+    CREATE TABLE IF NOT EXISTS fahima_v2_customer_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      customer_id INTEGER NOT NULL REFERENCES fahima_v2_customers(id), amount REAL NOT NULL CHECK(amount>0),
+      effective_date TEXT NOT NULL, description TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+      source_message_id INTEGER REFERENCES messages(id), created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id,idempotency_key)
+    );
+    CREATE TABLE IF NOT EXISTS fahima_v2_suppliers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(project_id,name)
+    );
+    CREATE TABLE IF NOT EXISTS fahima_v2_purchases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      supplier_id INTEGER REFERENCES fahima_v2_suppliers(id), product_id INTEGER REFERENCES products(id),
+      quantity REAL NOT NULL, unit_cost REAL NOT NULL, amount REAL NOT NULL, paid_amount REAL NOT NULL DEFAULT 0,
+      effective_date TEXT NOT NULL, description TEXT NOT NULL, idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(project_id,idempotency_key)
+    );
+    CREATE TABLE IF NOT EXISTS fahima_v2_supplier_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      supplier_id INTEGER NOT NULL REFERENCES fahima_v2_suppliers(id), amount REAL NOT NULL, effective_date TEXT NOT NULL,
+      description TEXT NOT NULL, idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(project_id,idempotency_key)
+    );
+    CREATE TABLE IF NOT EXISTS fahima_v2_opening_balances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK(kind IN ('cash','customer_receivable','supplier_payable')), amount REAL NOT NULL,
+      party_id INTEGER, effective_date TEXT NOT NULL, description TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+      UNIQUE(project_id,idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS fahima_v2_sales_scope_idx ON fahima_v2_sales(project_id,effective_date);
+    CREATE INDEX IF NOT EXISTS fahima_v2_customer_payments_scope_idx ON fahima_v2_customer_payments(project_id,effective_date);
   `);
   const outcomeColumns=new Set(db.prepare('PRAGMA table_info(fahima_v2_plan_outcomes)').all().map(row=>row.name));
   if(!outcomeColumns.has('idempotency_key'))db.exec('ALTER TABLE fahima_v2_plan_outcomes ADD COLUMN idempotency_key TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS fahima_v2_outcome_idem_idx ON fahima_v2_plan_outcomes(project_id,idempotency_key) WHERE idempotency_key IS NOT NULL');
+  const saleColumns = new Set(db.prepare('PRAGMA table_info(fahima_v2_sales)').all().map(row => row.name));
+  if (!saleColumns.has('unit_cost')) db.exec('ALTER TABLE fahima_v2_sales ADD COLUMN unit_cost REAL');
 }
 
 module.exports = { openDatabase, ensureBaseTables, ensureRuntimeTables };

@@ -2,16 +2,23 @@ const express = require('express');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createProjectRepository } = require('../database/repositories/project-repository');
+const { createArabicReportPdf } = require('../domain/reporting/pdf-report');
+const { createReportDataService } = require('../domain/reporting/report-data-service');
 
 function createApp({ db, config, agent, tts }) {
   const app = express();
   app.use(express.json({ limit: '64kb' }));
   app.use(express.static(path.join(config.root, 'src/public')));
   const projects = createProjectRepository(db);
+  const reports = createReportDataService({ db, ledger: agent.ledger, projects });
   app.get('/api/projects', (req, res) => res.json({ projects: projects.list() }));
   app.post('/api/projects', (req, res) => {
     try { res.status(201).json({ project: projects.create(req.body?.name) }); }
     catch (error) { res.status(400).json({ error: error.message }); }
+  });
+  app.delete('/api/projects/:id', (req, res, next) => {
+    try { res.json({ deleted: projects.remove(Number(req.params.id)) }); }
+    catch (error) { next(error); }
   });
   app.post('/api/chat', async (req, res, next) => {
     try {
@@ -57,18 +64,20 @@ function createApp({ db, config, agent, tts }) {
   app.get('/api/projects/:id/transactions',(req,res)=>{const id=Number(req.params.id);if(!projects.get(id))return res.status(404).json({error:'المشروع غير موجود.'});const rows=db.prepare('SELECT * FROM transactions WHERE project_id=? ORDER BY date DESC,id DESC LIMIT 200').all(id);res.json({transactions:rows.map(row=>({...row,audit:agent.transactions.audit(id,row.id)}))});});
   app.get('/api/projects/:id/report', (req, res) => {
     const projectId = Number(req.params.id);
-    if (!projects.get(projectId)) return res.status(404).json({ error: 'المشروع غير موجود.' });
     const from = String(req.query.from || ''), to = String(req.query.to || '');
-    if (!validDate(from) || !validDate(to) || from > to) return res.status(400).json({ error: 'اختاري فترة زمنية صحيحة.' });
-    const transactions = db.prepare('SELECT id,type,amount,date,description,estimated FROM transactions WHERE project_id=? AND voided_at IS NULL AND date>=? AND date<=? ORDER BY date DESC,id DESC').all(projectId, from, to);
-    const inventory = db.prepare('SELECT name,unit,current_quantity,unit_cost FROM products WHERE project_id=? ORDER BY name').all(projectId);
-    const totals = {};
-    for (const row of transactions) {
-      const group = totals[row.type] || (totals[row.type] = { confirmed: 0, estimated: 0, count: 0 });
-      group[row.estimated ? 'estimated' : 'confirmed'] += row.amount;
-      group.count++;
-    }
-    res.json({ projectId, from, to, totals, transactions, inventory, note: 'الإيراد والمشتريات والمصروفات معروضة كلٌ على حدة؛ لا يمثّل الفرق بينها صافي الربح.' });
+    try { res.json(reports.build(projectId, from, to)); }
+    catch (error) { res.status(Number(error.status) || 500).json({ error: error.message }); }
+  });
+  app.get('/api/projects/:id/report.pdf', async (req, res, next) => {
+    const projectId = Number(req.params.id);
+    const from = String(req.query.from || ''), to = String(req.query.to || '');
+    try {
+      const report = reports.build(projectId, from, to);
+      const pdf = await createArabicReportPdf(report);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="fahima-report-${projectId}-${from}-${to}.pdf"`);
+      res.send(pdf);
+    } catch (error) { next(error); }
   });
   app.get('/api/projects/:id/conversation', (req, res) => {
     const projectId = Number(req.params.id);

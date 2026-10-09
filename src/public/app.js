@@ -188,7 +188,8 @@ function renderSidebarPlan(data, records) {
     .slice(0, 20)) {
     const item = document.createElement("div");
     item.className = "transaction-row";
-    item.textContent = `${row.type} · ${row.amount} جنيه · ${row.date}`;
+    const labels = { income: "مبيعات", stock_cost: "مشتريات", operating_expense: "مصروف", withdrawal: "سحب" };
+    item.textContent = `${labels[row.type] || "عملية"} · ${row.amount} جنيه · ${row.date}`;
     list.append(item);
   }
   if (!records.transactions.length) list.textContent = "مفيش معاملات مسجلة.";
@@ -301,6 +302,15 @@ $("#newProject").onclick = async () => {
     projectId = result.project.id;
     await loadProjects();
   }
+};
+$("#deleteProject").onclick = async () => {
+  if (!projectId) return;
+  const selected = $("#projects").selectedOptions[0]?.textContent || "المشروع";
+  if (!confirm(`حذف ${selected} وكل سجلاته؟ لا يمكن التراجع عن الحذف.`)) return;
+  const button = $("#deleteProject"); button.disabled = true;
+  try { await api(`/api/projects/${projectId}`, { method: "DELETE" }); projectId = null; conversationId = null; await loadProjects(); }
+  catch (error) { $("#status").textContent = error.message; }
+  finally { button.disabled = false; }
 };
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -441,16 +451,37 @@ $("#loadReport").onclick = async () => {
       operating_expense: "مصروفات",
       withdrawal: "مسحوبات",
     };
-    $("#report").textContent =
-      Object.entries(report.totals)
+    const summary = report.summary || {};
+    $("#report").textContent = [
+      `المبيعات: ${Number(summary.invoicedSales || 0).toLocaleString("ar-EG")} جنيه`,
+      `المقبوض: ${Number(summary.cashCollected || 0).toLocaleString("ar-EG")} جنيه`,
+      `لسه ليك عند الزباين: ${Number(summary.totalOutstanding || 0).toLocaleString("ar-EG")} جنيه`,
+      `تكلفة البضاعة المباعة: ${Number(summary.cogs || 0).toLocaleString("ar-EG")} جنيه`,
+      `مجمل المكسب: ${Number(summary.grossProfit || 0).toLocaleString("ar-EG")} جنيه`,
+      ...(report.outsideRangeCount ? [`فيه ${report.outsideRangeCount} عملية خارج الفترة المختارة.`] : []),
+      ...(report.outsideRangeCount && report.availableRange?.fromDate ? [`العمليات الموجودة من ${report.availableRange.fromDate} إلى ${report.availableRange.toDate}.`] : []),
+      ...(Object.entries(report.totals)
         .map(
           ([type, v]) =>
             `${labels[type] || type}: ${Number(v.confirmed).toLocaleString("ar-EG")} جنيه`,
         )
-        .join("\n") || "مفيش معاملات في الفترة دي.";
+        .join("\n") ? [] : ["مفيش معاملات مسجلة في الفترة دي."]),
+    ].join("\n");
   } catch (e) {
     $("#report").textContent = e.message;
   }
+};
+$("#downloadReport").onclick = async () => {
+  const from = $("#reportFrom").value, to = $("#reportTo").value;
+  if (!from || !to || !projectId) { $("#report").textContent = "اختاري الفترة الأول."; return; }
+  const button = $("#downloadReport"); button.disabled = true; button.textContent = "جاري التحميل…";
+  try {
+    const response = await fetch(`/api/projects/${projectId}/report.pdf?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    if (!response.ok) throw new Error("مش قادر أجهز التقرير دلوقتي.");
+    const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement("a");
+    link.href = url; link.download = `fahima-report-${projectId}-${from}-${to}.pdf`; document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000); $("#report").textContent = "التقرير اتحمل على جهازك.";
+  } catch (e) { $("#report").textContent = e.message; } finally { button.disabled = false; button.textContent = "تحميل PDF"; }
 };
 loadProjects().catch((e) => {
   $("#status").textContent = e.message;

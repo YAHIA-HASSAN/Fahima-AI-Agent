@@ -1,0 +1,6 @@
+This directory contains Noto Naskh Arabic, licensed under the SIL Open Font License, Version 1.1.
+
+The complete license text is available at:
+https://scripts.sil.org/OFL
+
+Copyright 2022 The Noto Project Authors (https://github.com/notofonts/arabic)

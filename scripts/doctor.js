@@ -1,6 +1,7 @@
 const path = require('node:path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { loadConfig } = require('../src/shared/config');
+const { chromium } = require('playwright');
 const { openDatabase, ensureBaseTables, ensureRuntimeTables } = require('../src/database/connection');
 const config = loadConfig();
 const errors = [];
@@ -19,6 +20,7 @@ try {
   console.log(`✓ ${runtimeTables} additive runtime tables ready`);
   console.log(`✓ Gemini ${config.geminiApiKey ? 'configured' : 'not configured (live reasoning unavailable)'}`);
   console.log(`✓ Serper ${config.serperApiKey ? 'configured' : 'not configured (live search unavailable)'}`);
+  console.log(`✓ Chromium ${require('node:fs').existsSync(chromium.executablePath()) ? 'available' : 'missing; run npx playwright install chromium'}`);
   console.log(`→ Fahima listens on port ${config.port}`);
 } catch (error) { errors.push(error.message); }
 if (errors.length) { for (const error of errors) console.error(`✗ ${error}`); process.exitCode = 1; }

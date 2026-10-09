@@ -5,8 +5,11 @@ const { createMemoryService } = require('../memory/memory-service');
 const { createTransactionService } = require('../domain/finance/transaction-service');
 const { createInventoryService } = require('../domain/inventory/inventory-service');
 const { createPlanService } = require('../domain/planning/plan-service');
+const { createLedgerService } = require('../domain/finance/ledger-service');
 const { createTaskManager } = require('./task-manager');
 const { createOrchestrator } = require('./orchestrator');
+const { createProjectRepository } = require('../database/repositories/project-repository');
+const { createReportDataService } = require('../domain/reporting/report-data-service');
 
 function createAgent({ db, config, model: injectedModel, search }) {
   const model = injectedModel || createGeminiModel(config);
@@ -14,9 +17,11 @@ function createAgent({ db, config, model: injectedModel, search }) {
   const transactions = createTransactionService(db);
   const inventory = createInventoryService(db);
   const plans = createPlanService(db);
+  const ledger = createLedgerService(db, transactions, inventory);
+  const reports = createReportDataService({ db, ledger, projects: createProjectRepository(db) });
   const tasks = createTaskManager(db, { leaseMs: config.leaseMs });
   const registry = createToolRegistry();
-  registerTools({ registry, db, memory, transactions, inventory, plans, search });
+  registerTools({ registry, db, memory, transactions, inventory, plans, ledger, reports, search });
   const orchestrator = createOrchestrator({ db, config, model, registry, memory, tasks });
   const createRun = db.transaction(({ projectId, conversationId, message, inputMode, requestId }) => {
     const project = db.prepare('SELECT id FROM projects WHERE id=?').get(projectId);
@@ -47,7 +52,7 @@ function createAgent({ db, config, model: injectedModel, search }) {
       if (!record.reused) orchestrator.start(record.taskId);
       return { taskId: record.taskId, conversationId: record.conversationId, status: 'QUEUED', reused: record.reused };
     },
-    tasks, plans, transactions, inventory, orchestrator, registry, memory,
+    tasks, plans, transactions, inventory, ledger, reports, orchestrator, registry, memory,
   };
 }
 module.exports = { createAgent };
