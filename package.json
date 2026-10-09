@@ -3,17 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "description": "فهيمة: مستشارة أعمال عربية للمشروعات الصغيرة",
-  "main": "server/index.js",
+  "main": "src/server/server.js",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
-    "test": "node -e \"process.env.NODE_ENV='test'; process.env.SEARCH_PROVIDER='gemini'; require('./test/finance.test'); require('./test/agent-architecture.test'); require('./test/reply-timing.test'); require('./test/agent-tasks.test'); require('./test/data-flow.test'); require('./test/advisor.test'); require('./test/market-search.test'); require('./test/serper-search.test'); require('./test/db-migrations.test')\"",
-    "test:live": "node test/live-agent-integration.test.js",
-    "test:live-search": "node test/live-search-diagnostic.test.js",
-    "test:live-search-once": "node test/live-search-once.test.js",
-    "test:live-serper": "node test/live-serper-search.test.js",
-    "setup": "node scripts/setup.js",
-    "doctor": "node scripts/doctor.js"
+    "start": "node src/server/server.js",
+    "dev": "node --watch src/server/server.js",
+    "test": "node --test --test-isolation=none tests/*.test.js",
+    "doctor": "node scripts/doctor.js",
+    "test:live": "node scripts/live-check.js",
+    "test:live:plan": "node scripts/live-plan.js",
+    "test:live:tts": "node scripts/live-tts-check.js"
   },
   "engines": {
     "node": ">=20"
