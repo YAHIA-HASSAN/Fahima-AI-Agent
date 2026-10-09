@@ -248,6 +248,7 @@ test('HTTP business data comes from confirmed LLM fields and scoped SQLite recor
     });
   } finally {
     agent.__setGeminiClientForTests(null);
+    await app.locals.agentTasks.close();
     await new Promise(resolve => server.close(resolve));
     db.close();
     if (oldPath === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = oldPath;

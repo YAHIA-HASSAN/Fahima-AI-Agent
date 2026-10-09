@@ -76,7 +76,7 @@ test('completed background research renders its result and starts the returned a
   const globals={
     followedResearchJobs:new Set(),EventSource,
     addMessage:text=>{const row={text,removed:false,remove(){this.removed=true;},classList:{add(){}}};messages.push(row);return row;},
-    addResearchSources:()=>{},lastReplyText:'',playReplyButton:{hidden:true},generatedAudio:null,
+    addResearchSources:()=>{},lastReplyText:'',playReplyButton:{hidden:true},audioBusy:false,activeAudioPlaying:false,activeAudioDone:Promise.resolve(),
     playReplyAudio:(text,auto,url)=>audio.push({text,auto,url}),refreshProjectData:()=>{},api:async()=>({status:'running'})
   };
   const follow=browserFunction('followResearchJob','async function sendMessage',globals);
@@ -85,6 +85,20 @@ test('completed background research renders its result and starts the returned a
   assert.equal(streams[0].closed,true);
   assert.ok(messages.some(row=>row.text==='النتيجة المحسوبة جاهزة'));
   assert.deepEqual(audio,[{text:'النتيجة جاهزة',auto:true,url:'/api/tts/stream/test'}]);
+});
+
+test('Gemini PCM chunks decode as little-endian audio without waiting for a complete file', () => {
+  let channel;
+  const context={createBuffer:(_channels,samples,rate)=>{
+    assert.equal(samples,3);assert.equal(rate,24000);
+    channel=new Float32Array(samples);
+    return {getChannelData:()=>channel};
+  }};
+  const decode=browserFunction('pcmAudioBuffer','function playReplyAudio',{});
+  decode(context,new Uint8Array([0,0,255,127,0,128]));
+  assert.equal(channel[0],0);
+  assert.ok(channel[1]>0.99);
+  assert.equal(channel[2],-1);
 });
 
 test('empty database prompts project creation and never requests a fixed project ID', async () => {

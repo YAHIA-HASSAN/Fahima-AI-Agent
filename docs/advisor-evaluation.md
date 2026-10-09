@@ -2,7 +2,7 @@
 
 ## Running
 
-Use the existing Node.js installation and dependencies. `npm test` uses temporary SQLite databases and mocked Gemini and search responses; it does not call the provider. `npm run dev` starts the application with the configured Gemini model, grounded search, and audio settings. Schema version 4 is applied automatically to the selected database without deleting existing records.
+Use the existing Node.js installation and dependencies. `npm test` uses temporary SQLite databases and mocked Gemini and search responses; it does not call the provider. `npm run dev` starts the application with the configured Gemini model, grounded search, and audio settings. Schema migrations run automatically on the selected database without deleting existing records.
 
 For a separate manual evaluation database in PowerShell:
 
@@ -34,10 +34,14 @@ Use the existing server-side `GEMINI_API_KEY` configuration. Never paste a key i
 | Hypothetical | «لو كان معايا 50 ألف بدل 12 ألف، أقدر أعمل إيه؟» | Discusses a scenario without overwriting actual capital. |
 | Frustration | «قولتلك معايا 12 ألف! إنت بتسأل تاني ليه؟» | Uses the known value and continues constructively. |
 | Duplicate voice identity | Replay a chat request and its confirmation with the same `requestId` | Cached result, no duplicate transaction, including after restart. A different message using that identity is rejected. |
+| Durable plan task | «معايا 10 آلاف جنيه وعايز أبدأ مشروع دواجن» | Chat responds promptly with task status; progress and final result are recoverable after reconnect or server restart. Plan is stored as complete or provisional with missing inputs shown. |
+| Plan discussion | After a plan: «ليه اخترتي العدد ده؟» then «زودي رأس المال لـ 15 ألف» | Answer references saved plan context; a material correction creates a revision and marks affected strategy for review. |
+| Stale research | Reuse a saved price with an observation date more than 30 days old | Price stays in research history but is excluded from confirmed calculation inputs. |
+| Quality metrics | Request `/api/agent-metrics` with a selected project | Returns only that project's task and plan outcome metrics; no records from another project are included. |
 
 ## Automated coverage and limits
 
-The tests exercise real Express routes, schema validation, SQLite writes, migrations, tool calculations, plan revisions, project isolation, interruptions and reloads. Provider fixtures represent different interpretations of the example messages; they do **not** establish that the configured live model always interprets them correctly. Inspect actual model behavior with the conversation checks above.
+The tests exercise real Express routes, schema validation, SQLite writes, migrations, tool calculations, plan revisions, project isolation, interruptions, expired-lease recovery, task idempotency, plan validation, and reloads. Provider fixtures represent different interpretations of the example messages; they do **not** establish that the configured live model always interprets them correctly. Inspect actual model behavior with the conversation checks above. The suite also verifies prompt return and task follow-up using mocked providers, not actual Gemini latency or search quality.
 
 Response checks catch known internal terms, exposed syntax, some unsupported numeric claims, duplicate questions and obvious guarantees. They are lightweight safeguards, not a complete semantic or safety verifier. Specialist recommendations, spoken-language understanding, long conversations, unfamiliar names, real browser audio, and live supplier availability still require manual evaluation. Automated tests mock grounded search; use a configured Gemini key for the live research check and verify every displayed source page, unit, location, and retrieval date.
 

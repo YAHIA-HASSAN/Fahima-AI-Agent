@@ -15,13 +15,17 @@ const calc=(type,fields={})=>({id:'result',type,budget:null,reserve:null,price:n
 const fact=(key,value,evidence,extra={})=>({key,label:key==='capital'?'الفلوس المتاحة للبداية':'معلومة عن المشروع',value:String(value),numeric_value:typeof value==='number'?value:null,unit:typeof value==='number'?'جنيه':null,kind:'fact',certainty:'confirmed',evidence,correction:false,observed_on:null,...extra});
 const output=(fields={})=>({intent:'advise',transaction_status:'unclear',transactions:[],transaction_type:null,amount:null,amount_kind:null,date:'',period:'today',description:'',estimated:false,product_name:null,quantity:null,unit:null,unit_price:null,markup_percent:null,reminder_title:null,due_date:null,fact_key:null,fact_value:null,answer:'نقدر نبدأ بخطوة مناسبة لوضع المشروع.',...fields});
 const state=(objective,mode='continue',next_action='نراجع المتطلبات قبل أي شراء.')=>({mode,objective,capability:'تقييم الوضع',next_action,progress:null});
-const plan=(title,step)=>({title,summary:'خطة مبدئية حسب الظروف المتاحة.',requirements:['مراجعة ملاءمة المكان.'],assumptions:['الطلب محتاج تجربة صغيرة.'],risks:['الأسعار والطلب ممكن يتغيروا.'],steps:[{key:'first',text:step,status:'proposed',evidence:null}],indicators:['تسجيل نتيجة التجربة.'],next_action:step});
+const plan=(title,step)=>({title,summary:'خطة مبدئية حسب الظروف المتاحة.',requirements:['مراجعة ملاءمة المكان.'],assumptions:['الطلب محتاج تجربة صغيرة.'],risks:['الأسعار والطلب ممكن يتغيروا.'],steps:[{key:'first',text:step,status:'proposed',evidence:null}],indicators:['تسجيل نتيجة التجربة.'],next_action:step,sources:[]});
 
 test('planning tools use deterministic arithmetic, explicit reserves, and no missing-price guesses',()=>{
   const facts=[{key:'capital',numeric_value:10000,certainty:'confirmed'},{key:'price',numeric_value:10,certainty:'approximate',kind:'price',observed_on:'2026-10-08',source:'user'}];
   const budget=calculate(calc('budget',{budget:reference('capital'),reserve:literal(2000),lines:[{label:'تجهيز',weight:1,amount:null},{label:'تشغيل',weight:2,amount:null}]}),{facts});
   assert.equal(budget.values.allocations.reduce((sum,row)=>sum+Math.round(row.amount*100),0),800000);
   assert.equal(budget.values.reserve,2000);
+  const proposed=calculate(calc('budget',{budget:reference('capital'),reserve:literal(1500),lines:[{label:'تكلفة معروفة',weight:1,amount:literal(2000)},{label:'تشغيل مقترح',weight:1,amount:null}]}),{facts});
+  assert.equal(proposed.values.allocations.reduce((sum,row)=>sum+Math.round(row.amount*100),0)+Math.round(proposed.values.reserve*100)+Math.round(proposed.values.unallocated*100),1000000);
+  assert.equal(proposed.values.allocations.find(row=>row.label==='تشغيل مقترح').amount,6500);
+  assert.equal(proposed.scenario,true);assert.equal(proposed.sources.find(row=>row.label==='reserve').certainty,'hypothetical');
   const purchase=calculate(calc('purchase',{budget:reference('capital'),reserve:literal(4000),price:reference('price')}),{facts});
   assert.equal(purchase.values.quantity,600);
   assert.equal(purchase.values.remaining,4000);
@@ -60,15 +64,15 @@ test('adaptive advisory scenarios persist independently and survive an applicati
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fahima-advisor-'));
   const saved={DB_PATH:process.env.DB_PATH,GEMINI_API_KEY:process.env.GEMINI_API_KEY};
   process.env.DB_PATH=path.join(dir,'test.sqlite');process.env.GEMINI_API_KEY='test-key';
-  let db,B,server,base,next=output(),captured='',marketResearch;
+  let db,B,server,base,next=output(),captured='',marketResearch,decisionResponder=null;
   async function start() {
     for(const name of ['../server/db','../server/business','../server/index'])delete require.cache[require.resolve(name)];
     const app=require('../server/index');db=require('../server/db');B=require('../server/business');marketResearch=require('../server/market-research');
-    agent.__setGeminiClientForTests({interactions:{create:async request=>{captured=request.input;return {output_text:JSON.stringify(next)};}}});
+    agent.__setGeminiClientForTests({interactions:{create:async request=>{captured=request.input;return {output_text:JSON.stringify(decisionResponder?.(String(request.input||''))||next)};}}});
     server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));
     base=`http://127.0.0.1:${server.address().port}`;
   }
-  async function stop(){await new Promise(resolve=>server.close(resolve));db.close();}
+  async function stop(){await require('../server/index').locals.agentTasks.close();await new Promise(resolve=>server.close(resolve));db.close();}
   async function api(route,body){const response=await fetch(base+route,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return {status:response.status,...await response.json()};}
   async function researchJob(id,projectId){
     const response=await fetch(`${base}/api/research-jobs/${id}/events?projectId=${projectId}`);
@@ -77,7 +81,15 @@ test('adaptive advisory scenarios persist independently and survive an applicati
   }
   async function create(name){const row=await api('/api/projects',{name});return {projectId:row.project.id,conversationId:row.conversationId};}
   async function send(scope,message,fields={},identity=randomUUID()){
-    next=output(fields);return api('/api/chat',{...scope,message,requestId:identity});
+    next=output(fields);const response=await api('/api/chat',{...scope,message,requestId:identity});
+    if(!response.agentTaskId)return response;
+    const until=Date.now()+10000;
+    while(Date.now()<until){
+      const task=await api(`/api/agent-tasks/${response.agentTaskId}?projectId=${scope.projectId}`);
+      if(!['QUEUED','RUNNING'].includes(task.status))return {...response,...(task.result||{}),kind:['COMPLETE','PROVISIONAL'].includes(task.status)?'advice':'clarify',taskStatus:task.status};
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    throw new Error('Agent task test did not reach a terminal state.');
   }
   await start();
   try {
@@ -86,7 +98,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
     await t.test('multiple facts save automatically once and memory supplies capital on follow-up',async()=>{
       const fields={facts:[fact('capital',10000,'معايا 10 آلاف جنيه'),fact('activity','تربية دواجن','مشروع دواجن'),fact('space','أوضة فاضية','عندي أوضة فاضية',{kind:'resource'})],state_update:state('تقييم بداية المشروع')};
       let response=await send(primary,msg,fields,'first-message');
-      assert.equal(response.kind,'advice');assert.doesNotMatch(response.reply,/أحفظ|capital/);
+      assert.equal(response.kind,'clarify');assert.equal(response.taskStatus,'WAITING_FOR_INPUT');assert.doesNotMatch(response.reply,/أحفظ|capital/);
       assert.equal(B.getProject(primary.projectId).capital,10000);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM project_facts WHERE project_id=?').get(primary.projectId).n,3);
       await send(primary,msg,fields,'first-message');
@@ -100,6 +112,18 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       let response=await send(primary,'احسب وقولي',{answer:'تمام، هنحسب ونقولك النتيجة.'});
       assert.doesNotMatch(response.reply,/هنحسب|هنبدأ|هراجع/);
       assert.match(response.reply,/ما بدأش|مدخلات/);
+
+      const oldNext=next;let calls=0;
+      agent.__setGeminiClientForTests({interactions:{create:async()=>{
+        calls+=1;
+        const fields=calls===1?{answer:'تمام، هنحسب ونقولك النتيجة.'}:{answer:'التقسيم المبدئي حسب الميزانية المحفوظة.',calculations:[calc('budget',{budget:reference('capital'),reserve:literal(2000),lines:[{label:'بداية التشغيل',weight:1,amount:null}]})]};
+        return {output_text:JSON.stringify(output(fields))};
+      }}});
+      response=await api('/api/chat',{...primary,message:'احسبي',requestId:'short-action-retry'});
+      assert.equal(calls,2);assert.equal(response.calculations[0].values.budget,10000);
+      assert.match(response.reply,/التقسيم المقترح/);
+      next=oldNext;agent.__setGeminiClientForTests({interactions:{create:async request=>{captured=request.input;return {output_text:JSON.stringify(decisionResponder?.(String(request.input||''))||next)};}}});
+
       response=await send(primary,'وريني حسابات الشهر ده',{intent:'question',period:'month',answer:'حاضر، هجهز التقرير.'});
       assert.equal(response.kind,'report');assert.ok(response.period.from);assert.ok(response.period.to);
       const report=await api(`/api/report?projectId=${primary.projectId}&from=${response.period.from}&to=${response.period.to}`);
@@ -111,7 +135,7 @@ test('adaptive advisory scenarios persist independently and survive an applicati
         facts:[fact('capital',10000,'معايا 10 تلاف جنيه'),fact('activity','مشروع دواجن','مشروع دواجن')],
         state_update:state('تجهيز بداية مناسبة للمشروع'),answer:'المبلغ والنشاط اتسجلوا. هحدد متطلبات البداية الأساسية وأحسب خطة أولية من غير ما أفترض أسعار.'
       });
-      assert.equal(response.kind,'advice');assert.equal(B.getProject(scope.projectId).capital,10000);
+      assert.equal(response.kind,'clarify');assert.equal(response.taskStatus,'WAITING_FOR_INPUT');assert.equal(B.getProject(scope.projectId).capital,10000);
       response=await send(scope,'عايز ايه يعني مش فاهم منك حاجه',{answer:'هحسب لك عدد بداية مبدئي بعد مراجعة سعر الكتكوت والعلف، وهسيب جزء للتجهيز والطوارئ.',state_update:state('تجهيز بداية مناسبة للمشروع')});
       assert.doesNotMatch(response.reply,/هل نبدأ|معاك كام/);
 
@@ -157,23 +181,26 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       marketResearch.__setGeminiClientForTests({interactions:{create:async request=>{
         searchCalls++;
         if(searchCalls===1)await firstSearchGate;
-        assert.ok(request.tools.some(tool=>tool.type==='google_search'));
+        assert.deepEqual(request.tools.map(tool=>tool.type),['google_search']);
         return {output_text:JSON.stringify({summary:'عرض منشور تمت مراجعته.',items:[{product_name:'مدخل تشغيل',description:'عبوة مناسبة',price:10,currency:'EGP',quantity:1,unit:'وحدة',normalized_price:10,normalized_unit:'وحدة',seller:'مورد تجريبي',source_url:source,source_kind:'published_offer',observed_on:B.localDate(),location:'مصر',confidence:'medium',availability:'راجع التوفر',excerpt:'السعر منشور على صفحة المنتج'}]}),
           steps:[{type:'model_output',content:[{type:'text',annotations:[{type:'url_citation',url:source,title:'صفحة المورد'}]}]}]};
       }}});
-      const pendingResponse=send(primary,'دوري على سعر المدخل واحسبي اللي نقدر نشتريه',{research_requests:[{key:'input_unit',query:'سعر مدخل التشغيل للوحدة في مصر',purpose:'price',product_name:'مدخل تشغيل',specification:null,unit:'وحدة',location:'مصر',freshness_days:7,reason:'حساب كمية بداية مناسبة'}],
+      next=output({research_requests:[{key:'input_unit',query:'سعر مدخل التشغيل للوحدة في مصر',purpose:'price',product_name:'مدخل تشغيل',specification:null,unit:'وحدة',location:'مصر',freshness_days:7,reason:'حساب كمية بداية مناسبة'}],
         calculations:[calc('purchase',{budget:reference('capital'),reserve:literal(2000),price:reference('market:input_unit')})]});
+      const pendingResponse=api('/api/chat',{...primary,message:'دوري على سعر المدخل واحسبي اللي نقدر نشتريه',requestId:'quick-market-task'});
       const quick=await Promise.race([pendingResponse,new Promise(resolve=>setTimeout(()=>resolve(null),100))]);
       assert.ok(quick,'main chat response must not wait for market research');
       let response=quick;releaseFirstSearch();
       assert.ok(response.researchJobId);assert.deepEqual(response.calculations[0].missing,['market:input_unit']);
       let finished=await researchJob(response.researchJobId,primary.projectId);
       assert.equal(finished.status,'completed');response=finished.result;
-      assert.equal(response.calculations[0].values.quantity,800);
+      assert.equal(response.calculations[0].values.quantity,800,JSON.stringify(response));
       assert.equal(response.research[0].items[0].source_url,source);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM market_research WHERE project_id=?').get(primary.projectId).n,1);
+      const persistedResearch=db.prepare('SELECT provider,validation_status FROM market_research WHERE project_id=? AND research_key=?').get(primary.projectId,'input_unit');
+      assert.equal(persistedResearch.provider,'gemini');assert.equal(persistedResearch.validation_status,'accepted_for_planning');
       assert.equal(db.prepare("SELECT COUNT(*) n FROM market_research WHERE project_id<>? AND research_key='input_unit'").get(primary.projectId).n,0);
-      assert.match(response.reply,/سعر منشور|بحث السوق/);
+      assert.match(response.reply,/بحث السوق|صفحة المورد|مصدر/);
       response=await send(primary,'راجعي نفس السعر تاني',{research_requests:[{key:'input_unit',query:'سعر مدخل التشغيل للوحدة في مصر',purpose:'price',product_name:'مدخل تشغيل',specification:null,unit:'وحدة',location:'مصر',freshness_days:7,reason:'مراجعة الحساب'}],
         calculations:[calc('purchase',{budget:reference('capital'),reserve:literal(2000),price:reference('market:input_unit')})]});
       assert.equal(searchCalls,1);assert.equal(response.calculations[0].values.quantity,800);
@@ -197,9 +224,11 @@ test('adaptive advisory scenarios persist independently and survive an applicati
           calculations:[calc('purchase',{budget:reference('capital'),reserve:literal(2000),price:reference('market:stalled_item')})]});
         assert.ok(response.researchJobId);
         const finished=await researchJob(response.researchJobId,primary.projectId);
-        assert.equal(finished.status,'completed');
-        assert.match(finished.result.reply,/اتأخر|فوقفت الانتظار|حساب مشروط/);
+        assert.equal(finished.status,'completed',JSON.stringify(finished));
+        assert.match(finished.result.reply,/اتأخر|فوقفت الانتظار|حساب مشروط|البحث ماكملش/);
         assert.deepEqual(finished.result.calculations[0].missing,['market:stalled_item']);
+        assert.ok(finished.result.metrics.decisions>=2,'The timeout result must return to Gemini for a follow-up decision.');
+        assert.match(captured,/tool_results/);
       } finally {
         marketResearch.__setGeminiClientForTests(null);
         if(oldTimeout===undefined)delete process.env.GEMINI_SEARCH_TIMEOUT_MS;else process.env.GEMINI_SEARCH_TIMEOUT_MS=oldTimeout;
@@ -282,6 +311,37 @@ test('adaptive advisory scenarios persist independently and survive an applicati
       const saved=await send(scope,'أيوه');assert.equal(saved.transaction.amount,20);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE project_id=?').get(scope.projectId).n,1);
       assert.equal(db.prepare('SELECT COUNT(*) n FROM business_plans WHERE project_id=?').get(scope.projectId).n,1);
+    });
+    await t.test('full plan task runs asynchronously, persists validated output, and reuses its revision in discussion',async()=>{
+      const scope=await create('مشروع خطة الأجهزة');
+      await send(scope,'معايا 10000 جنيه ومتاح لي محل صغير لصيانة الأجهزة',{facts:[
+        fact('capital',10000,'معايا 10000 جنيه'),fact('activity','صيانة الأجهزة','صيانة الأجهزة'),fact('space','محل صغير','محل صغير',{kind:'resource'})
+      ],state_update:state('بدء مشروع صيانة الأجهزة')});
+      next=output({answer:'هراجع مواردك وأوزع الميزانية مع احتياطي واضح.',plan:plan('خطة مشروع صيانة الأجهزة','ابدأ بفحص الطلب وتحديد الخدمات الأكثر طلبًا قبل شراء قطع الغيار.'),
+        calculations:[calc('budget',{budget:reference('capital'),reserve:literal(2000),lines:[{label:'تجهيز أساسي',weight:1,amount:null},{label:'تشغيل مبدئي',weight:2,amount:null}]})],
+        state_update:state('إعداد خطة صيانة الأجهزة')});
+      const startedAt=Date.now();
+      const started=await api('/api/chat',{...scope,message:'عايز خطة لمشروع صيانة الأجهزة بميزانية 10000',requestId:'full-plan-task'});
+      assert.equal(started.kind,'task');assert.ok(started.agentTaskId);assert.ok(Date.now()-startedAt<500);
+      let task;const deadline=Date.now()+3000;
+      do {task=await api(`/api/agent-tasks/${started.agentTaskId}?projectId=${scope.projectId}`);if(!['QUEUED','RUNNING'].includes(task.status))break;await new Promise(resolve=>setTimeout(resolve,10));} while(Date.now()<deadline);
+      assert.equal(task.status,'PROVISIONAL',JSON.stringify(task));
+      assert.equal(task.result.planRef.status,'PROVISIONAL');
+      const retrieved=await api(`/api/plans/${task.result.planRef.planId}?projectId=${scope.projectId}`);
+      assert.equal(retrieved.status,200);assert.ok(retrieved.plan.body.calculations.some(row=>row.values?.budget===10000));
+      const savedPlan=db.prepare('SELECT * FROM business_plans WHERE project_id=? ORDER BY revision DESC LIMIT 1').get(scope.projectId);
+      assert.equal(savedPlan.revision,task.result.planRef.revision);
+      assert.equal(savedPlan.status,'PROVISIONAL');assert.equal(JSON.parse(savedPlan.body).validation.status,'PROVISIONAL');
+
+      next=output({answer:'الاحتياطي بيساعدك تكملي التشغيل لو ظهرت مصاريف أو تأخر البيع.'});
+      const discussion=await send(scope,'ليه خليتي احتياطي في الخطة؟',{answer:'الاحتياطي بيساعدك تكملي التشغيل لو ظهرت مصاريف أو تأخر البيع.'});
+      assert.match(discussion.reply,/الاحتياطي/);assert.ok(captured.includes('خطة مشروع صيانة الأجهزة'));
+
+      const revised=await send(scope,'رأس المال بقى 15000 جنيه',{answer:'عدلت الحساب على رأس المال الجديد.',facts:[fact('capital',15000,'رأس المال بقى 15000 جنيه',{correction:true})],
+        calculations:[calc('budget',{budget:reference('capital'),reserve:literal(3000),lines:[{label:'تجهيز أساسي',weight:1,amount:null},{label:'تشغيل مبدئي',weight:2,amount:null}]})],
+        plan:plan('خطة مشروع صيانة الأجهزة','ابدأ بالخدمات الأساسية على مراحل وراجع المصروفات أسبوعيًا.')});
+      assert.equal(revised.calculations[0].values.budget,15000);
+      assert.ok((await api(`/api/init?projectId=${scope.projectId}`)).advisor.plan.revision>savedPlan.revision);
     });
     await t.test('restart restores memory, plans, goals, objective and durable request receipts',async()=>{
       const before=(await api(`/api/init?projectId=${primary.projectId}`)).advisor;

@@ -233,6 +233,134 @@ function migrate() {
       `);
     })();
   }
+  if (db.pragma('user_version', { simple: true }) < 6) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE agent_tasks (
+          id TEXT PRIMARY KEY,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          task_type TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('QUEUED','RUNNING','COMPLETE','PROVISIONAL','WAITING_FOR_INPUT','FAILED','CANCELLED')),
+          objective TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          result_json TEXT,
+          error TEXT,
+          progress TEXT NOT NULL DEFAULT '',
+          decision_count INTEGER NOT NULL DEFAULT 0,
+          tool_count INTEGER NOT NULL DEFAULT 0,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          estimated_cost REAL,
+          budget_json TEXT NOT NULL,
+          project_fingerprint TEXT NOT NULL,
+          lease_owner TEXT,
+          lease_expires_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX agent_tasks_claim_idx ON agent_tasks(status,lease_expires_at,created_at);
+        CREATE INDEX agent_tasks_scope_idx ON agent_tasks(project_id,conversation_id,created_at DESC);
+        CREATE TABLE agent_task_steps (
+          id INTEGER PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+          step_key TEXT NOT NULL,
+          sequence INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+          input_hash TEXT NOT NULL,
+          result_json TEXT,
+          error TEXT,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          UNIQUE(task_id,step_key)
+        );
+        CREATE TABLE agent_task_metrics (
+          id INTEGER PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+          metric TEXT NOT NULL,
+          value REAL NOT NULL,
+          details_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX agent_task_metrics_task_idx ON agent_task_metrics(task_id,metric);
+        CREATE TABLE agent_task_deliveries (
+          task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+          message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          delivered_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 6;
+      `);
+    })();
+  }
+  if (db.pragma('user_version', { simple: true }) < 7) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE business_plans ADD COLUMN change_reason TEXT NOT NULL DEFAULT '';
+        CREATE TABLE plan_outcomes (
+          id INTEGER PRIMARY KEY,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          plan_id INTEGER NOT NULL REFERENCES business_plans(id) ON DELETE CASCADE,
+          transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+          planned_json TEXT NOT NULL,
+          actual_json TEXT NOT NULL,
+          amount_variance REAL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(plan_id,transaction_id)
+        );
+        CREATE INDEX plan_outcomes_project_idx ON plan_outcomes(project_id,created_at DESC);
+        PRAGMA user_version = 7;
+      `);
+    })();
+  }
+  if (db.pragma('user_version', { simple: true }) < 8) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE market_research ADD COLUMN provider TEXT NOT NULL DEFAULT 'gemini';
+        ALTER TABLE market_research ADD COLUMN validation_status TEXT NOT NULL DEFAULT 'unverified';
+        PRAGMA user_version = 8;
+      `);
+    })();
+  }
+  if (db.pragma('user_version', { simple: true }) < 9) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_task_deliveries (
+          task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+          message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          delivered_at TEXT NOT NULL
+        );
+      `);
+      const columns = db.prepare('PRAGMA table_info(agent_task_deliveries)').all();
+      const expected = [
+        ['task_id', 'TEXT', 1], ['message_id', 'INTEGER', 0], ['delivered_at', 'TEXT', 0],
+      ];
+      if (columns.length !== expected.length || expected.some(([name, type, primary]) => {
+        const column = columns.find(item => item.name === name);
+        return !column || String(column.type).toUpperCase() !== type || Number(column.pk) !== primary ||
+          (name !== 'task_id' && Number(column.notnull) !== 1);
+      })) throw new Error('Invalid agent_task_deliveries schema; migration was not marked complete.');
+      const foreignKeys = db.prepare('PRAGMA foreign_key_list(agent_task_deliveries)').all();
+      if (!foreignKeys.some(key => key.from === 'task_id' && key.table === 'agent_tasks' && key.to === 'id' && key.on_delete === 'CASCADE') ||
+          !foreignKeys.some(key => key.from === 'message_id' && key.table === 'messages' && key.to === 'id' && key.on_delete === 'CASCADE')) {
+        throw new Error('Invalid agent_task_deliveries foreign keys; migration was not marked complete.');
+      }
+      db.pragma('user_version = 9');
+    })();
+  }
+  // Fail startup before workers are constructed if delivery's contract is ever damaged.
+  const deliveryColumns = db.prepare('PRAGMA table_info(agent_task_deliveries)').all().map(column => column.name).sort();
+  if (db.pragma('user_version', { simple: true }) < 9 || deliveryColumns.join(',') !== 'delivered_at,message_id,task_id') {
+    throw new Error('SQLite agent task delivery schema is not ready.');
+  }
 }
-migrate();
+try {
+  migrate();
+} catch (error) {
+  db.close();
+  throw error;
+}
+db.dbPath = dbPath;
 module.exports = db;

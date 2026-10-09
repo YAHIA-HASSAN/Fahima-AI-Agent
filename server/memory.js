@@ -26,16 +26,27 @@ function createMemory(db) {
     const row=db.prepare('SELECT * FROM business_plans WHERE project_id=? ORDER BY revision DESC LIMIT 1').get(projectId);
     return row?{...row,body:JSON.parse(row.body)}:null;
   }
+  function experience(projectId) {
+    const outcomes=db.prepare(`SELECT o.*,p.title AS plan_title FROM plan_outcomes o JOIN business_plans p ON p.id=o.plan_id
+      WHERE o.project_id=? ORDER BY o.created_at DESC,o.id DESC LIMIT 12`).all(projectId).map(row=>({...row,
+        planned:JSON.parse(row.planned_json),actual:JSON.parse(row.actual_json)}));
+    const revisions=db.prepare('SELECT revision,title,change_reason,created_at FROM business_plans WHERE project_id=? ORDER BY revision DESC LIMIT 6').all(projectId);
+    return {outcomes,revisions};
+  }
   function stalePlans(projectId) {db.prepare('UPDATE business_plans SET stale=1 WHERE project_id=?').run(projectId);}
   function research(projectId,{freshOnly=false}={}) {
     const now=new Date().toISOString();
-    const rows=db.prepare(`SELECT * FROM market_research WHERE project_id=? ${freshOnly?'AND valid_until>=?':''} ORDER BY retrieved_at DESC,id DESC`)
-      .all(...(freshOnly?[projectId,now]:[projectId]));
-    return rows.map(row=>({...row,stale:row.valid_until<now}));
+    const rows=db.prepare('SELECT * FROM market_research WHERE project_id=? ORDER BY retrieved_at DESC,id DESC').all(projectId)
+      .map(row=>{
+        const age=row.observed_on?Date.now()-Date.parse(`${row.observed_on}T00:00:00Z`):Infinity;
+        const expired=row.valid_until<now||(row.price!=null&&(!Number.isFinite(age)||age>30*86400000||age< -86400000));
+        return {...row,stale:expired};
+      });
+    return freshOnly?rows.filter(row=>!row.stale):rows;
   }
   function researchFacts(projectId) {
     const seen=new Set();
-    return research(projectId,{freshOnly:true}).filter(row=>row.selected&&row.price!=null&&String(row.currency||'').toUpperCase()==='EGP')
+    return research(projectId,{freshOnly:true}).filter(row=>row.selected&&row.price!=null&&String(row.currency||'').toUpperCase()==='EGP'&&row.source_url?.startsWith('https://')&&(row.unit||row.normalized_unit))
       .filter(row=>{if(seen.has(row.research_key))return false;seen.add(row.research_key);return true;})
       .map(row=>({key:`market:${row.research_key}`,label:row.product_name||row.research_key,value:String(row.normalized_price??row.price),
         numeric_value:row.normalized_price??row.price,unit:row.normalized_unit||row.unit,kind:'price',certainty:'approximate',
@@ -44,10 +55,28 @@ function createMemory(db) {
   function saveResearch(projectId,result) {
     if(!result?.request?.key)return [];
     db.prepare('UPDATE market_research SET selected=0 WHERE project_id=? AND research_key=?').run(projectId,result.request.key);
-    const insert=db.prepare(`INSERT INTO market_research(project_id,research_key,query,purpose,product_name,specification,description,price,currency,quantity,unit,normalized_price,normalized_unit,seller,source_title,source_url,source_kind,observed_on,retrieved_at,valid_until,location,confidence,availability,delivery_cost,total_cost,selected,raw_excerpt)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-    const usable=(result.items||[]).findIndex(row=>row.price!=null&&String(row.currency||'').toUpperCase()==='EGP'&&row.source_url);
-    for(const [index,row] of (result.items||[]).entries())insert.run(projectId,row.research_key,row.query,row.purpose,row.product_name,row.specification,row.description,row.price,row.currency,row.quantity,row.unit,row.normalized_price,row.normalized_unit,row.seller,row.source_title,row.source_url,row.source_kind,row.observed_on,row.retrieved_at,row.valid_until,row.location,row.confidence,row.availability,row.delivery_cost,row.total_cost,index===usable?1:0,row.raw_excerpt);
+    const insert=db.prepare(`INSERT INTO market_research(project_id,research_key,query,purpose,product_name,specification,description,price,currency,quantity,unit,normalized_price,normalized_unit,seller,source_title,source_url,source_kind,observed_on,retrieved_at,valid_until,location,confidence,availability,delivery_cost,total_cost,selected,raw_excerpt,provider,validation_status)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const normalize=value=>String(value||'').toLocaleLowerCase('ar-EG').replace(/[\s\u0640]/gu,'').trim();
+    const requested=result.request;
+    const now=Date.now();
+    const isUsable=row=>{
+      if(row.price==null||String(row.currency||'').toUpperCase()!=='EGP'||!String(row.source_url||'').startsWith('https://')||!row.unit&&!row.normalized_unit||!row.observed_on)return false;
+      const observed=Date.parse(`${row.observed_on}T00:00:00Z`);
+      if(!Number.isFinite(observed)||now-observed>30*86400000||observed>now+86400000)return false;
+      if(row.confidence==='low'||!['published_offer','market_estimate'].includes(row.source_kind)||!String(row.source_title||row.seller||'').trim())return false;
+      const askedProduct=normalize(requested?.product_name),foundProduct=normalize(row.product_name);
+      if(askedProduct&&(!foundProduct||!askedProduct.includes(foundProduct)&&!foundProduct.includes(askedProduct)))return false;
+      const askedSpec=normalize(requested?.specification),foundSpec=normalize(row.specification);
+      if(askedSpec&&!foundSpec.includes(askedSpec))return false;
+      const askedUnit=normalize(requested?.unit),foundUnit=normalize(row.normalized_unit||row.unit);
+      if(askedUnit&&askedUnit!==foundUnit)return false;
+      const askedLocation=normalize(requested?.location),foundLocation=normalize(row.location);
+      if(askedLocation&&askedLocation!=='مصر'&&(!foundLocation||!foundLocation.includes(askedLocation)&&!askedLocation.includes(foundLocation)))return false;
+      return true;
+    };
+    const usable=(result.items||[]).findIndex(isUsable);
+    for(const [index,row] of (result.items||[]).entries())insert.run(projectId,row.research_key,row.query,row.purpose,row.product_name,row.specification,row.description,row.price,row.currency,row.quantity,row.unit,row.normalized_price,row.normalized_unit,row.seller,row.source_title,row.source_url,row.source_kind,row.observed_on,row.retrieved_at,row.valid_until,row.location,row.confidence,row.availability,row.delivery_cost,row.total_cost,index===usable?1:0,row.raw_excerpt,result.provider||'gemini',index===usable?'accepted_for_planning':String(row.validation_status||'unverified').slice(0,60));
     if((result.items||[]).length)stalePlans(projectId);
     return research(projectId).filter(row=>row.retrieved_at===result.retrieved_at&&row.research_key===result.request.key);
   }
@@ -114,9 +143,18 @@ function createMemory(db) {
     const body={...plan,steps,calculations};
     if(previous&&!previous.stale&&JSON.stringify(previous.body)===JSON.stringify(body))return previous;
     const revision=(previous?.revision||0)+1;
-    const result=db.prepare('INSERT INTO business_plans(project_id,revision,title,body,source_message_id) VALUES(?,?,?,?,?)').run(projectId,revision,plan.title,JSON.stringify(body),messageId);
+    const result=db.prepare('INSERT INTO business_plans(project_id,revision,title,body,source_message_id,change_reason) VALUES(?,?,?,?,?,?)')
+      .run(projectId,revision,plan.title,JSON.stringify(body),messageId,previous?String(message||'').slice(0,500):'إنشاء الخطة الأولى');
     return {...db.prepare('SELECT * FROM business_plans WHERE id=? AND project_id=?').get(result.lastInsertRowid,projectId),body};
   }
-  return {facts,state,goals,latestPlan,stalePlans,research,researchFacts,saveResearch,applyFacts,applyGoals,saveState,savePlan};
+  function setPlanValidation(projectId,planId,validation) {
+    const row=db.prepare('SELECT body FROM business_plans WHERE id=? AND project_id=?').get(planId,projectId);
+    if(!row)return false;
+    const status=['COMPLETE','PROVISIONAL','FAILED','INVALID'].includes(validation?.status)?validation.status:'PROVISIONAL';
+    const body=JSON.parse(row.body);body.validation={status,valid:status==='COMPLETE',missing:[...(validation?.missing||[])]};
+    db.prepare('UPDATE business_plans SET status=?,body=? WHERE id=? AND project_id=?').run(status,JSON.stringify(body),planId,projectId);
+    return true;
+  }
+  return {facts,state,goals,latestPlan,experience,stalePlans,research,researchFacts,saveResearch,applyFacts,applyGoals,saveState,savePlan,setPlanValidation};
 }
 module.exports = {createMemory,factLabel,labels};

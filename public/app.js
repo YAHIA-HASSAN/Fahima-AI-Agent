@@ -149,6 +149,8 @@ async function load() {
   renderProfileStep();
   await voiceStatus();
   setReplyBusy(false);
+  api(`/api/agent-tasks?projectId=${state.project.id}&conversationId=${conversation.conversation.id}`)
+    .then(({tasks})=>tasks.forEach(task=>followAgentTask(task.id,state.project.id))).catch(()=>{});
 }
 function renderFacts(facts) {
   $("#facts-list").innerHTML = facts?.length
@@ -184,6 +186,56 @@ async function refreshProjectData() {
   }
 }
 const followedResearchJobs=new Set();
+const followedAgentTasks=new Set();
+const deliveredAgentTaskMessages=new Set();
+function followAgentTask(taskId,projectId) {
+  if(followedAgentTasks.has(taskId))return;
+  followedAgentTasks.add(taskId);
+  const progress=addMessage('براجع الخطة والمعلومات…');
+  const events=new EventSource(`/api/agent-tasks/${encodeURIComponent(taskId)}/events?projectId=${encodeURIComponent(projectId)}`);
+  let finished=false;
+  const finish=async update=>{
+    if(finished||!['COMPLETE','PROVISIONAL','WAITING_FOR_INPUT','FAILED','CANCELLED'].includes(update.status))return;
+    finished=true;followedAgentTasks.delete(taskId);events.close();progress.remove();
+    if(update.status==='FAILED'||update.status==='CANCELLED') {
+      const failure=addMessage(update.result?.reply||update.error||(update.status==='CANCELLED'?'تم إيقاف المهمة.':'تعذر إكمال المهمة دلوقتي.'));
+      if(!update.result?.reply)failure.classList.add('error');
+      return;
+    }
+    const result=update.result||{};
+    let planLoadError=false;
+    if(result.planRef?.planId) {
+      try {
+        const response=await api(`/api/plans/${encodeURIComponent(result.planRef.planId)}?projectId=${encodeURIComponent(projectId)}`);
+        if(Number(response.plan?.project_id)!==Number(projectId)||Number(response.plan?.revision)!==Number(result.planRef.revision))throw new Error('الخطة المحفوظة لا تطابق نتيجة المهمة.');
+        if(state?.project?.id===Number(projectId)){state.advisor=state.advisor||{};state.advisor.plan=response.plan;renderProfileStep();}
+      } catch {planLoadError=true;}
+    }
+    if(!deliveredAgentTaskMessages.has(taskId)) {
+      const message=planLoadError?'تعذر تحميل الخطة المحفوظة، لذلك مش هاعرض المهمة على إنها جاهزة. جرّب تحديث الصفحة.':result.reply;
+      if(message)addMessage(message);
+      deliveredAgentTaskMessages.add(taskId);
+    }
+    addResearchSources(result.research);
+    if(result.reply&&!planLoadError){
+      lastReplyText=result.speechText||result.reply;playReplyButton.hidden=false;
+      const speak=()=>void playReplyAudio(lastReplyText,true,result.speechStreamUrl);
+      if(audioBusy||activeAudioPlaying)activeAudioDone.finally(speak);else speak();
+    }
+    if(result.planRef||result.plan||result.state||result.research)void refreshProjectData();
+  };
+  events.onmessage=event=>{
+    let update;try{update=JSON.parse(event.data);}catch{return;}
+    if(update.progress)progress.textContent=update.progress;
+    void finish(update);
+  };
+  events.onerror=async()=>{
+    if(finished)return;
+    progress.textContent='بستعيد متابعة المهمة…';
+    try{await finish(await api(`/api/agent-tasks/${encodeURIComponent(taskId)}?projectId=${encodeURIComponent(projectId)}`));}
+    catch(error){finished=true;followedAgentTasks.delete(taskId);events.close();progress.textContent=error.message||'متابعة المهمة اتوقفت مؤقتًا.';progress.classList.add('error');}
+  };
+}
 function followResearchJob(jobId, projectId) {
   if(followedResearchJobs.has(jobId))return;
   followedResearchJobs.add(jobId);
@@ -201,7 +253,7 @@ function followResearchJob(jobId, projectId) {
       lastReplyText=result.speechText||result.reply;
       playReplyButton.hidden=false;
       const speak=()=>void playReplyAudio(lastReplyText,true,result.speechStreamUrl);
-      if(generatedAudio&&!generatedAudio.paused)generatedAudio.addEventListener("ended",speak,{once:true});
+      if(audioBusy||activeAudioPlaying)activeAudioDone.finally(speak);
       else speak();
     }
     if(result.marketResearchChanged||result.plan||result.advisorState)void refreshProjectData();
@@ -269,7 +321,8 @@ async function sendMessage(text, inputType = "text") {
       playReplyButton.hidden = false;
     }
     if (result.reply) void playReplyAudio(lastReplyText, true, result.speechStreamUrl);
-    if (result.researchJobId) followResearchJob(result.researchJobId, state.project.id);
+    if (result.agentTaskId) followAgentTask(result.agentTaskId, state.project.id);
+    else if (result.researchJobId) followResearchJob(result.researchJobId, state.project.id);
     if (result.kind === "report") void downloadReport(result.period.from, result.period.to);
     if (result.plan) $("#profile-panel").hidden = false;
     if (result.kind === "saved" || result.factsChanged || result.plan || result.advisorState || result.marketResearchChanged) void refreshProjectData();
@@ -283,6 +336,7 @@ async function sendMessage(text, inputType = "text") {
 }
 $("#message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  void primeAudioPlayback();
   const input = $("#message-text");
   const button = $("#send-text");
   const text = input.value.trim();
@@ -310,13 +364,27 @@ function renderProfileStep() {
   if (data.goals?.length) html += '<h3>الأهداف</h3>' + list(data.goals.map(goal => goal.title + (goal.horizon ? ' · ' + goal.horizon : '')));
   if (plan) {
     html += '<details open><summary>' + escapeHtml(plan.title) + ' · نسخة ' + plan.revision + '</summary>';
+    const planStatus=plan.body?.validation?.status||plan.status;
+    if(planStatus==='COMPLETE')html+='<p class="note">الخطة اجتازت مراجعة الاكتمال.</p>';
+    else if(planStatus==='PROVISIONAL')html+='<p class="note">الخطة مبدئية؛ راجع الافتراضات والنواقص قبل الاعتماد عليها.</p>';
+    else if(planStatus==='INVALID')html+='<p class="note">الخطة غير صالحة للاعتماد؛ الأرقام أو المدخلات تحتاج تصحيحًا.</p>';
+    else if(planStatus==='FAILED')html+='<p class="note">تعذر التحقق من الخطة الحالية.</p>';
+    if(plan.body.validation?.missing?.length)html+='<p class="note">محتاجين نراجع: '+escapeHtml(plan.body.validation.missing.join('، '))+'</p>';
     if (plan.stale) html += '<p class="note">في معلومات اتغيرت. الخطة دي محتاجة مراجعة قبل الاعتماد عليها.</p>';
+    if (plan.change_reason) html += '<p class="note">سبب آخر تحديث: ' + escapeHtml(plan.change_reason) + '</p>';
     html += '<p>' + escapeHtml(plan.body.summary) + '</p>';
     for (const [key,label] of [['requirements','اللي محتاجينه'],['assumptions','افتراضات محتاجة مراجعة'],['risks','حاجات ناخد بالنا منها'],['indicators','هنعرف التقدم إزاي']]) {
       if (plan.body[key]?.length) html += '<h4>' + label + '</h4>' + list(plan.body[key]);
     }
     html += '<h4>خطوات التنفيذ</h4>' + list(plan.body.steps.map(step => step.text + (step.status === 'completed' ? ' · تمت' : step.status === 'in_progress' ? ' · شغالين عليها' : ' · مقترحة')));
     if (plan.body.calculations?.length) html += '<h4>الحسابات</h4>' + list(plan.body.calculations.map(row => row.display || '').filter(Boolean));
+    if (plan.body.sources?.length) {
+      html += '<h4>مصادر الخطة والأسعار</h4><ul>' + plan.body.sources.slice(0,8).map(source => {
+        const url=safeWebUrl(source.url);
+        const label=[source.title||source.product,source.observed_on?` · ${source.observed_on}`:'',source.stale?' · قديم':''].join('');
+        return `<li>${url?`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`:escapeHtml(label)}</li>`;
+      }).join('') + '</ul>';
+    }
     html += '</details>';
   }
   const research = data.knowledge?.research || [];
@@ -469,6 +537,7 @@ function createRecognition() {
   return instance;
 }
 recordButton.addEventListener("click", () => {
+  void primeAudioPlayback();
   if (!state || !voiceAvailable || voiceMode === "starting" || voiceMode === "processing") return;
   if (voiceMode === "recording") {
     setVoiceMode("processing", "ثانية واحدة…");
@@ -483,26 +552,55 @@ recordButton.addEventListener("click", () => {
   catch { setVoiceMode("ready", "مش قادرة أفتح الميكروفون دلوقتي. جرب تاني أو اكتب."); }
 });
 playReplyButton.addEventListener("click", () => {
-  if (generatedAudio && generatedAudioUrl && generatedAudioText === lastReplyText) {
-    generatedAudio.play().catch(() => { $("#recording-status").textContent = "الصوت جاهز. اضغط الزر مرة تانية للتشغيل."; });
-    return;
-  }
-  playReplyAudio(lastReplyText, true);
+  void primeAudioPlayback();
+  void playReplyAudio(lastReplyText, true);
 });
-let generatedAudio = null;
-let generatedAudioUrl = "";
-let generatedAudioText = "";
 let audioRequest = 0;
+let audioContext = null;
+let activeAudioController = null;
+let activeAudioSources = [];
+let activeAudioPlaying = false;
+let audioBusy = false;
+let activeAudioDone = Promise.resolve();
+async function primeAudioPlayback() {
+  const AudioContextApi=window.AudioContext||window.webkitAudioContext;
+  if(!AudioContextApi)return null;
+  if(!audioContext)audioContext=new AudioContextApi({sampleRate:24000});
+  if(audioContext.state==='suspended')await audioContext.resume().catch(()=>{});
+  return audioContext;
+}
+function stopActiveAudio() {
+  activeAudioController?.abort();
+  for(const source of activeAudioSources)try{source.stop();}catch{}
+  activeAudioSources=[];
+  activeAudioPlaying=false;
+}
+function pcmAudioBuffer(context,bytes) {
+  const samples=Math.floor(bytes.length/2);
+  const buffer=context.createBuffer(1,samples,24000);
+  const channel=buffer.getChannelData(0);
+  for(let index=0;index<samples;index+=1){
+    let sample=bytes[index*2]|(bytes[index*2+1]<<8);
+    if(sample>=0x8000)sample-=0x10000;
+    channel[index]=sample/0x8000;
+  }
+  return buffer;
+}
 function playReplyAudio(text,autoPlay=false,streamUrl=null) {
   const clean=String(text||"").trim();
   if(!clean)return Promise.resolve();
-  return playReplyWithGemini(clean,autoPlay,streamUrl);
+  const task=playReplyWithGemini(clean,autoPlay,streamUrl);
+  activeAudioDone=task.catch(()=>{});
+  return task;
 }
 async function playReplyWithGemini(text, autoPlay = false, streamUrl = null) {
   const clean = String(text || "").trim();
   if (!clean) return;
   const request=++audioRequest;
-  if (generatedAudio) generatedAudio.pause();
+  stopActiveAudio();
+  const controller=new AbortController();
+  activeAudioController=controller;
+  audioBusy=true;
   playReplyButton.disabled = true;
   playReplyButton.textContent = "⏳ بجهز الصوت…";
   $("#recording-status").textContent = "الصوت هيبدأ أول ما توصل أول دفعة…";
@@ -522,28 +620,44 @@ async function playReplyWithGemini(text, autoPlay = false, streamUrl = null) {
       resolvedStreamUrl=ticket.streamUrl;
     }
     if(request!==audioRequest)return;
-    if (generatedAudio) generatedAudio.pause();
-    generatedAudioUrl = resolvedStreamUrl;
-    generatedAudio = new Audio(generatedAudioUrl);
-    generatedAudio.preload = "auto";
-    generatedAudioText = clean;
-    generatedAudio.onplaying = () => { $("#recording-status").textContent = "فهيمة بتقرأ الرد بصوت عربي."; playReplyButton.textContent = "🔁 اسمع الرد تاني"; };
-    generatedAudio.onended = () => { $("#recording-status").textContent = "خلص الرد الصوتي. تقدر تسمعه تاني من الزر."; playReplyButton.textContent = "🔁 اسمع الرد تاني"; };
-    generatedAudio.onerror = () => { $("#recording-status").textContent = "تعذر تشغيل الصوت دلوقتي. الرد المكتوب جاهز."; playReplyButton.textContent = "🔊 اسمع الرد"; playReplyButton.disabled=false; };
-    if (autoPlay) {
-      try {
-        await generatedAudio.play();
-      } catch {
-        playReplyButton.textContent = "▶️ شغلي الرد";
-        $("#recording-status").textContent = "المتصفح منع التشغيل التلقائي. الصوت جاهز؛ اضغط الزر للتشغيل.";
-      }
-    } else {
-      $("#recording-status").textContent = "الصوت جاهز.";
+    const audioResponse=await appFetch(resolvedStreamUrl,{signal:controller.signal});
+    if(!audioResponse.ok){
+      const error=await audioResponse.json().catch(()=>({}));
+      throw Error(error.error||"تعذر تجهيز الصوت.");
     }
+    const context=await primeAudioPlayback();
+    if(!context||context.state!=='running')throw Error("المتصفح منع التشغيل التلقائي. اضغط زر اسمع الرد للمحاولة تاني.");
+    if(!audioResponse.body)throw Error("المتصفح مش قادر يستقبل بث الصوت.");
+    const reader=audioResponse.body.getReader();
+    let carry=new Uint8Array(0),scheduledAt=context.currentTime+0.04,received=false;
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      if(request!==audioRequest){await reader.cancel();return;}
+      let bytes=value;
+      if(carry.length){const merged=new Uint8Array(carry.length+value.length);merged.set(carry);merged.set(value,carry.length);bytes=merged;}
+      const usable=bytes.length-(bytes.length%2);
+      carry=bytes.slice(usable);
+      if(!usable)continue;
+      const source=context.createBufferSource();
+      source.buffer=pcmAudioBuffer(context,bytes.subarray(0,usable));
+      source.connect(context.destination);
+      scheduledAt=Math.max(scheduledAt,context.currentTime+0.02);
+      source.start(scheduledAt);
+      scheduledAt+=source.buffer.duration;
+      activeAudioSources.push(source);
+      if(!received){received=true;activeAudioPlaying=true;audioBusy=false;playReplyButton.disabled=false;playReplyButton.textContent="🔁 اسمع الرد تاني";$("#recording-status").textContent="فهيمة بتقرأ الرد بصوت Gemini.";}
+    }
+    if(!received)throw Error("Gemini مرجعش صوت قابل للتشغيل.");
+    await new Promise(resolve=>setTimeout(resolve,Math.max(0,(scheduledAt-context.currentTime)*1000)));
+    if(request===audioRequest){activeAudioPlaying=false;activeAudioSources=[];$("#recording-status").textContent="خلص الرد الصوتي. تقدر تسمعه تاني من الزر.";playReplyButton.textContent="🔁 اسمع الرد تاني";}
   } catch (error) {
-    $("#recording-status").textContent = error.message || "تعذر تجهيز صوت Gemini. الرد النصي موجود، وجرب زر إعادة السماع.";
+    if(request===audioRequest&&error?.name!=='AbortError'){
+      stopActiveAudio();
+      $("#recording-status").textContent = error.message || "تعذر تجهيز صوت Gemini. الرد النصي موجود، وجرب زر إعادة السماع.";
+    }
   } finally {
-    if(request===audioRequest)playReplyButton.disabled = false;
+    if(request===audioRequest){audioBusy=false;activeAudioPlaying=false;activeAudioController=null;playReplyButton.disabled = false;}
   }
 }
 voiceStatus();

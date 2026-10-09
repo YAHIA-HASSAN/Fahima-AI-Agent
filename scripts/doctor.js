@@ -41,17 +41,38 @@ try {
   const db = require('../server/db');
   const result = db.prepare('PRAGMA quick_check').get();
   check('SQLite', result?.quick_check === 'ok', result?.quick_check || 'database check failed', true);
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+  const requiredTables = ['projects','transactions','conversations','messages','project_facts','agent_tasks','agent_task_steps','agent_task_metrics','agent_task_deliveries','business_plans','chat_requests'];
+  const missingTables = requiredTables.filter(name => !tables.has(name));
+  const schemaVersion = db.pragma('user_version', { simple: true });
+  check('Database path', Boolean(db.dbPath), db.dbPath || 'unavailable', true);
+  check('Schema version', schemaVersion >= 9, `version ${schemaVersion}; latest migration 9`, true);
+  check('Required tables', missingTables.length === 0, missingTables.length ? `missing: ${missingTables.join(', ')}` : `${requiredTables.length} core tables present`, true);
+  const deliveryColumns = tables.has('agent_task_deliveries')
+    ? db.prepare('PRAGMA table_info(agent_task_deliveries)').all().map(column => column.name).sort()
+    : [];
+  const deliveryReady = deliveryColumns.join(',') === 'delivered_at,message_id,task_id' &&
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='agent_task_deliveries'").get() != null;
+  check('Agent task delivery schema', deliveryReady, deliveryReady ? 'delivery table and primary-key index ready' : 'delivery table contract is incomplete', true);
+  const indexes = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map(row => row.name));
+  const taskIndexes = ['agent_tasks_claim_idx','agent_tasks_scope_idx'];
+  check('Agent task indexes', taskIndexes.every(name => indexes.has(name)), taskIndexes.filter(name => !indexes.has(name)).join(', ') || 'claim and project-scope indexes ready', true);
+  check('Pending migrations', schemaVersion >= 9, schemaVersion >= 9 ? 'none' : 'database migration required', true);
+  check('Agent worker readiness', deliveryReady && schemaVersion >= 9 && requiredTables.every(name => tables.has(name)), 'database is initialized before worker startup', true);
   db.close();
 } catch (error) {
-  check('SQLite', false, 'run npm run setup; check DB_PATH configuration', true);
+  check('SQLite / schema initialization', false, 'database could not be opened or safely migrated; check DB_PATH and migration diagnostics', true);
 }
 
 const configProblems = config.issues;
 check('Configuration values', configProblems.length === 0, configProblems.join(' '));
 check('Gemini API key', Boolean(config.geminiApiKey), 'stored data and reports remain readable without a key');
+check('Market search provider', true, config.searchProvider);
+if(config.searchProvider==='serper')check('Serper API key',Boolean(config.serperApiKey),config.serperApiKey?'configured':'SERPER_API_KEY is missing; live search will remain unavailable until configured');
+if(config.searchFallbackProvider)check('Market search fallback',true,config.searchFallbackProvider);
 
 async function main() {
-  check('Voice architecture', true, 'browser speech recognition; direct progressive Gemini MP3 playback');
+  check('Voice architecture', true, 'browser speech recognition; direct Gemini PCM streaming through Web Audio');
 
   if (process.argv.includes('--check-gemini')) {
     if (!config.geminiApiKey) {

@@ -30,7 +30,7 @@ function createAdvisor(db,business) {
   function context(projectId) {
     const facts=memory.facts(projectId);
     const bounds=business.periodBounds('month');
-    return {facts,goals:memory.goals(projectId),state:memory.state(projectId),plan:memory.latestPlan(projectId),
+    return {facts,goals:memory.goals(projectId),state:memory.state(projectId),plan:memory.latestPlan(projectId),experience:memory.experience(projectId),
       records:{period:bounds,summary:business.getSummary(projectId,bounds.from,bounds.to)},
       knowledge:{market_search_available:true,
         prices:facts.filter(row=>row.kind==='price').map(row=>({key:row.key,value:row.value,numeric_value:row.numeric_value,unit:row.unit,observed_on:row.observed_on,source:row.source,certainty:row.certainty})),
@@ -115,11 +115,15 @@ function createAdvisor(db,business) {
           steps:items.map((item,index)=>({key:`planned_${index}`,text:item.description||message,status:'proposed',evidence:null}))};
       }
       const canUpdatePlan=!options.preserveState||memory.state(projectId).source_message_id===messageId;
-      if(parsed.plan&&canUpdatePlan&&!calculations.some(row=>row.missing.length)&&!applied.conflicts.length) {
+      if(parsed.plan&&canUpdatePlan&&!applied.conflicts.length) {
         const texts=[parsed.plan.title,parsed.plan.summary,...parsed.plan.assumptions,...parsed.plan.requirements,...parsed.plan.risks,
           ...parsed.plan.steps.map(step=>step.text),...parsed.plan.indicators,parsed.plan.next_action];
         if(texts.every(text=>validateText(text,qualityContext).valid)) {
-          const cleanPlan={...parsed.plan,proposed_transactions:proposals,title:cleanLanguage(parsed.plan.title),summary:cleanLanguage(parsed.plan.summary),
+          const sources=memory.research(projectId).filter(row=>row.selected).slice(0,20).map(row=>({title:row.source_title,url:row.source_url,kind:row.source_kind,
+            product:row.product_name,specification:row.specification,price:row.price,currency:row.currency,unit:row.normalized_unit||row.unit,
+            observed_on:row.observed_on,retrieved_at:row.retrieved_at,valid_until:row.valid_until,location:row.location,confidence:row.confidence,stale:row.stale}));
+          const cleanPlan={...parsed.plan,proposed_transactions:proposals,sources,project_facts:facts.map(row=>({key:row.key,label:row.label,value:row.value,certainty:row.certainty,unit:row.unit})),
+            title:cleanLanguage(parsed.plan.title),summary:cleanLanguage(parsed.plan.summary),
             assumptions:parsed.plan.assumptions.map(cleanLanguage),requirements:parsed.plan.requirements.map(cleanLanguage),risks:parsed.plan.risks.map(cleanLanguage),
             steps:parsed.plan.steps.map(step=>({...step,text:cleanLanguage(step.text)})),indicators:parsed.plan.indicators.map(cleanLanguage),next_action:cleanLanguage(parsed.plan.next_action)};
           plan=memory.savePlan(projectId,messageId,cleanPlan,calculations,message);

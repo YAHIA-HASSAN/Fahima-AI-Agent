@@ -40,7 +40,9 @@ test('migrates legacy financial rows and records itemized stock movements', () =
   try {
     const db=require('../server/db');
     const B=require('../server/business');
-    assert.equal(db.pragma('user_version',{simple:true}),5);
+    assert.equal(db.pragma('user_version',{simple:true}),9);
+    assert.ok(db.prepare('PRAGMA table_info(market_research)').all().some(column=>column.name==='provider'));
+    assert.ok(db.prepare('PRAGMA table_info(market_research)').all().some(column=>column.name==='validation_status'));
     assert.equal(B.getTransactions(1,'2026-09-01','2026-09-30').length,1);
     assert.equal(db.prepare('SELECT value FROM project_facts WHERE project_id=1 AND key=?').get('activity').value,'بقالة');
     const firstConversation=B.ensureConversation(1);

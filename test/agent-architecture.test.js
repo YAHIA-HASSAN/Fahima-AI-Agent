@@ -84,11 +84,14 @@ test('browser speech input is text-only and Gemini output streams without system
   assert.match(client, /appFetch\("\/api\/tts\/ticket"/);
   assert.match(client, /playReplyAudio\(lastReplyText, true, result\.speechStreamUrl\)/);
   assert.doesNotMatch(client, /speechSynthesis|SpeechSynthesisUtterance/);
-  assert.match(server, /response_format:\{type:'audio',mime_type:'audio\/mp3'\}/);
+  assert.match(server, /response_format:\{type:'audio',mime_type:'audio\/l16',sample_rate:24000\}/);
   assert.match(server, /stream:true/);
   assert.match(server, /\{timeout:config\.geminiTtsTimeoutMs\}/);
   assert.doesNotMatch(server, /timeout_ms:config\.geminiTtsTimeoutMs/);
   assert.match(server, /speechStreamUrl:issueTtsTicket/);
+  assert.match(client, /audioResponse\.body\.getReader\(\)/);
+  assert.match(client, /context\.createBuffer\(1,samples,24000\)/);
+  assert.doesNotMatch(client, /new Audio\(/);
   assert.match(client, /requestId: globalThis\.crypto\?\.randomUUID/);
   assert.doesNotMatch(client, /MediaRecorder|\/api\/voice\/transcribe|\/api\/voice\/synthesize/);
   assert.doesNotMatch(server, /createVoiceRouter|\/api\/voice/);

@@ -2,7 +2,7 @@
 const nullableText = (maxLength = 300) => ({ type: ['string','null'], maxLength });
 const text = (maxLength = 300) => ({ type: 'string', maxLength });
 const number = { type: ['number','null'] };
-const object = properties => ({ type: 'object', properties, required: Object.keys(properties) });
+const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required });
 const list = (items, maxItems = 12) => ({ type: 'array', items, maxItems });
 const fact = object({
   key: text(80), label: text(100), value: text(300), numeric_value: number, unit: nullableText(40),
@@ -33,11 +33,11 @@ const properties = {
   research_requests:list(object({
     key:text(80), query:text(300), purpose:{type:'string',enum:['price','supplier','requirement','regulation','market']},
     product_name:text(120), specification:nullableText(200), unit:nullableText(60), location:nullableText(120),
-    freshness_days:{type:'number'}, reason:text(300)
-  }),2),
+    freshness_days:{type:'number'}, search_type:{type:'string',enum:['search','shopping']}, reason:text(300)
+  },['key','query','purpose','product_name','specification','unit','location','freshness_days','reason']),2),
   plan: { ...object({ title:text(150),summary:text(700),
     assumptions:list(text(300)),requirements:list(text(300)),risks:list(text(300)),
     steps:list(object({ key:text(80),text:text(300),status:{type:'string',enum:['proposed','in_progress','completed']},evidence:nullableText(500) })),
-    indicators:list(text(200)),next_action:text(300) }), type:['object','null'] },
+    indicators:list(text(200)),next_action:text(300),sources:list(object({title:text(200),url:text(1000)}),12) }), type:['object','null'] },
 };
 module.exports = { properties };
