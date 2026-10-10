@@ -452,12 +452,12 @@ $("#loadReport").onclick = async () => {
       withdrawal: "مسحوبات",
     };
     const summary = report.summary || {};
-    $("#report").textContent = [
+    const reportLines = [
       `المبيعات: ${Number(summary.invoicedSales || 0).toLocaleString("ar-EG")} جنيه`,
       `المقبوض: ${Number(summary.cashCollected || 0).toLocaleString("ar-EG")} جنيه`,
       `لسه ليك عند الزباين: ${Number(summary.totalOutstanding || 0).toLocaleString("ar-EG")} جنيه`,
-      `تكلفة البضاعة المباعة: ${Number(summary.cogs || 0).toLocaleString("ar-EG")} جنيه`,
-      `مجمل المكسب: ${Number(summary.grossProfit || 0).toLocaleString("ar-EG")} جنيه`,
+      ...(summary.cogsComplete === false ? ["تكلفة البضاعة المباعة: مش متاحة بالكامل."] : [`تكلفة البضاعة المباعة: ${Number(summary.cogs || 0).toLocaleString("ar-EG")} جنيه`]),
+      ...(summary.grossProfit === null || summary.cogsComplete === false ? ["مجمل المكسب: مش ممكن يتحدد لسه لأن تكلفة بعض البضاعة مش معروفة."] : [`مجمل المكسب: ${Number(summary.grossProfit || 0).toLocaleString("ar-EG")} جنيه`]),
       ...(report.outsideRangeCount ? [`فيه ${report.outsideRangeCount} عملية خارج الفترة المختارة.`] : []),
       ...(report.outsideRangeCount && report.availableRange?.fromDate ? [`العمليات الموجودة من ${report.availableRange.fromDate} إلى ${report.availableRange.toDate}.`] : []),
       ...(Object.entries(report.totals)
@@ -466,7 +466,8 @@ $("#loadReport").onclick = async () => {
             `${labels[type] || type}: ${Number(v.confirmed).toLocaleString("ar-EG")} جنيه`,
         )
         .join("\n") ? [] : ["مفيش معاملات مسجلة في الفترة دي."]),
-    ].join("\n");
+    ];
+    $("#report").textContent = reportLines.join("\n");
   } catch (e) {
     $("#report").textContent = e.message;
   }

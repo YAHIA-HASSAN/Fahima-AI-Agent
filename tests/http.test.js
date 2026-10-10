@@ -32,7 +32,7 @@ test('text and transcribed voice use the same chat agent with durable delivery a
     assert.equal(messages.messages[0].input_type,'voice');
     const reportResponse = await fetch(`${base}/api/projects/${projectId}/report?from=2026-10-09&to=2026-10-09`);
     const report = await reportResponse.json();
-    assert.equal(report.totals.income.confirmed, 100);
+    assert.equal(report.totals.other_income.confirmed, 100);
     assert.equal(report.totals.operating_expense, undefined);
     assert.equal(Object.hasOwn(report, 'profit'), false);
     const duplicate = await fetch(`${base}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId, message: 'سؤال تجريبي', requestId: 'http-request-1' }) });
