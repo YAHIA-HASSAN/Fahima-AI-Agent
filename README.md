@@ -6,6 +6,7 @@
 
 ```powershell
 npm install
+npx install chromuim
 npm run doctor
 npm start
 ```
