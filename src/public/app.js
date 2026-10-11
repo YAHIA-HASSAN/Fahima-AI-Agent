@@ -8,98 +8,13 @@ let projectId = null,
   audioSources = [],
   audioRunning = false,
   audioStopped = false;
-function bubble(text, role = "assistant", plan = null) {
+function bubble(text, role = "assistant") {
   const node = document.createElement("div");
   node.className = `bubble ${role}`;
   node.textContent = text;
   $("#messages").append(node);
-  if (plan) $("#messages").append(planCard(plan));
   $("#messages").scrollTop = $("#messages").scrollHeight;
   return node;
-}
-function planCard(saved, full = false) {
-  const plan = saved?.plan || saved || {};
-  const card = document.createElement("article");
-  card.className = "plan-card";
-  const title = document.createElement("h3");
-  title.textContent = plan.objective || "خطة المشروع";
-  card.append(title);
-  const status = document.createElement("span");
-  status.className = "plan-status";
-  status.textContent =
-    (saved.qualityStatus || saved.quality_status) === "COMPLETE"
-      ? "خطة مكتملة"
-      : "خطة مبدئية";
-  card.append(status);
-  if (plan.budget) {
-    const money = document.createElement("p");
-    money.textContent = `رأس المال: ${Number(plan.budget.capital || 0).toLocaleString("ar-EG")} جنيه · إجمالي مقترح: ${Number(plan.budget.total || 0).toLocaleString("ar-EG")} جنيه`;
-    card.append(money);
-  }
-  const steps = document.createElement("div");
-  steps.innerHTML = "<strong>الخطوات الجاية</strong>";
-  const list = document.createElement("ol");
-  for (const step of (plan.steps || []).slice(0, 3)) {
-    const li = document.createElement("li");
-    li.textContent = step;
-    list.append(li);
-  }
-  steps.append(list);
-  card.append(steps);
-  if (
-    (plan.steps || []).length > 3 ||
-    plan.risks?.length ||
-    plan.assumptions?.length ||
-    plan.missingInformation?.length ||
-    plan.sources?.length
-  ) {
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = full ? "تفاصيل الخطة" : "شوفي الخطة";
-    details.append(summary);
-    details.append(fullPlan(plan));
-    card.append(details);
-  }
-  return card;
-}
-function fullPlan(plan) {
-  const box = document.createElement("div");
-  const add = (label, items) => {
-    if (!items?.length) return;
-    const h = document.createElement("p");
-    h.innerHTML = `<strong>${label}</strong><br>${items.map((x) => `• ${escapeHtml(x)}`).join("<br>")}`;
-    box.append(h);
-  };
-  add("الخطوات", plan.steps);
-  add("الافتراضات", plan.assumptions);
-  add("المخاطر", plan.risks);
-  add("المعلومات الناقصة", plan.missingInformation);
-  if (plan.budget) {
-    const b = document.createElement("p");
-    b.innerHTML = `<strong>الميزانية</strong><br>الإجمالي: ${Number(plan.budget.total || 0).toLocaleString("ar-EG")} جنيه<br>المتبقي: ${Number(plan.budget.remaining || 0).toLocaleString("ar-EG")} جنيه`;
-    box.append(b);
-  }
-  if (plan.sources?.length) {
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = "شوفي المصادر";
-    details.append(summary);
-    for (const source of plan.sources) {
-      const a = document.createElement("a");
-      a.href = source.url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = source.title || source.url;
-      details.append(a, document.createElement("br"));
-    }
-    box.append(details);
-  }
-  return box;
-}
-function escapeHtml(value) {
-  const node = document.createElement("span");
-  node.textContent = value;
-  return node.innerHTML;
 }
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -132,8 +47,7 @@ async function loadProjectData() {
   conversationId = null;
   $("#messages").replaceChildren();
   closePanels();
-  const [plan, history, records] = await Promise.all([
-    api(`/api/projects/${projectId}/plan`),
+  const [history, records] = await Promise.all([
     api(`/api/projects/${projectId}/conversation`),
     api(`/api/projects/${projectId}/transactions`),
   ]);
@@ -143,7 +57,6 @@ async function loadProjectData() {
       bubble(
         message.content,
         message.role === "user" ? "user" : "assistant",
-        message.plan,
       );
     lastReply =
       [...history.messages].reverse().find((m) => m.role === "assistant")
@@ -156,31 +69,9 @@ async function loadProjectData() {
     $("#cancelTask").hidden = false;
     void waitForTask(activeTaskId).finally(finishBusy);
   }
-  renderSidebarPlan(plan, records);
+  renderSidebarRecords(records);
 }
-function renderSidebarPlan(data, records) {
-  const saved = data.plan;
-  $("#plan").replaceChildren();
-  if (saved) {
-    const title = document.createElement("strong");
-    title.textContent = saved.plan.objective || "الخطة الحالية";
-    $("#plan").append(title);
-    const p = document.createElement("p");
-    p.textContent =
-      (saved.qualityStatus || saved.quality_status) === "COMPLETE"
-        ? "خطة مكتملة"
-        : "خطة مبدئية";
-    $("#plan").append(p);
-    const button = document.createElement("button");
-    button.className = "outline-button";
-    button.textContent = "شوف الخطة";
-    button.onclick = () => {
-      const old = $("#plan").querySelector(".plan-card");
-      if (old) old.remove();
-      $("#plan").append(planCard(saved, true));
-    };
-    $("#plan").append(button);
-  } else $("#plan").textContent = "مفيش خطة محفوظة لسه.";
+function renderSidebarRecords(records) {
   const list = $("#transactions");
   list.replaceChildren();
   for (const row of records.transactions
@@ -243,14 +134,12 @@ async function waitForTask(id, autoSpeak = false) {
       ].includes(data.task.status)
     ) {
       if (data.message) {
-        const saved = data.task.result?.plan;
         if (data.message.content)
-          bubble(data.message.content, "assistant", saved);
+          bubble(data.message.content, "assistant");
         lastReply = data.message.content;
         $("#playReply").hidden = !lastReply;
         if (autoSpeak) void speakReply();
       } else bubble(data.task.result?.answer || "");
-      if (data.task.result?.plan) await loadProjectData();
       $("#status").textContent =
         data.task.status === "WAITING_FOR_INPUT"
           ? "فهيمة محتاجة معلومة واحدة."
@@ -265,9 +154,9 @@ async function waitForTask(id, autoSpeak = false) {
   $("#status").textContent = "المهمة لسه شغالة؛ تقدري ترجعي بعد شوية.";
 }
 function closePanels() {
-  for (const id of ["planPanel", "recordsPanel", "reportPanel"])
+  for (const id of ["recordsPanel", "reportPanel"])
     $("#" + id).classList.add("collapsed");
-  for (const id of ["planToggle", "recordsToggle", "reportToggle"])
+  for (const id of ["recordsToggle", "reportToggle"])
     $("#" + id).setAttribute("aria-expanded", "false");
 }
 function togglePanel(button, panel) {
@@ -275,7 +164,6 @@ function togglePanel(button, panel) {
     open = el.classList.toggle("collapsed") === false;
   button.setAttribute("aria-expanded", String(open));
 }
-$("#planToggle").onclick = () => togglePanel($("#planToggle"), "planPanel");
 $("#recordsToggle").onclick = () =>
   togglePanel($("#recordsToggle"), "recordsPanel");
 $("#reportToggle").onclick = () =>

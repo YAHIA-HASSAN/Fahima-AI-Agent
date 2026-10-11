@@ -21,7 +21,7 @@ function createAgent({ db, config, model: injectedModel, search }) {
   const reports = createReportDataService({ db, ledger, projects: createProjectRepository(db) });
   const tasks = createTaskManager(db, { leaseMs: config.leaseMs });
   const registry = createToolRegistry();
-  registerTools({ registry, db, memory, transactions, inventory, plans, ledger, reports, search });
+  registerTools({ registry, db, memory, transactions, inventory, ledger, reports, search });
   const orchestrator = createOrchestrator({ db, config, model, registry, memory, tasks });
   const createRun = db.transaction(({ projectId, conversationId, message, inputMode, requestId }) => {
     const project = db.prepare('SELECT id FROM projects WHERE id=?').get(projectId);

@@ -28,7 +28,7 @@ async function runLoop({ model, registry, context, budgets, persistObservation =
     if (!calls.length) {
       const answer = parts.map(part => part.text).filter(Boolean).join('\n').trim() || decision.text;
       if (answer) {
-        recentRound=[decision.candidate,{ role: 'user', parts: [{ text: 'حوّلي الإجابة النهائية إلى استدعاء أداة. لو طلب المستخدم خطة مشروع استخدمي deliver_business_plan وأرسلي الخطة كاملة، وإلا استخدمي deliver_response. لا تنهي المهمة بنص عادي.' }] }];
+        recentRound=[decision.candidate,{ role: 'user', parts: [{ text: 'حوّلي الإجابة النهائية إلى استدعاء أداة deliver_response. إنشاء خطط المشروعات غير متاح، فلو طلب المستخدم خطة كاملة ارفضي ذلك بلطف وقدمي مساعدة في البحث أو الحسابات أو القرارات التشغيلية فقط. لا تنهي المهمة بنص عادي.' }] }];
         continue;
       }
       throw Object.assign(new Error('Gemini did not return a tool call or answer.'), { code: 'INVALID_GEMINI_DECISION' });

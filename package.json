@@ -10,7 +10,7 @@
     "test": "node --test --test-isolation=none tests/*.test.js",
     "doctor": "node scripts/doctor.js",
     "test:live": "node scripts/live-check.js",
-    "test:live:plan": "node scripts/live-plan.js",
+    "test:live:search": "node scripts/live-search.js",
     "test:live:tts": "node scripts/live-tts-check.js"
   },
   "engines": {

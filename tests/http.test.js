@@ -45,15 +45,15 @@ test('text and transcribed voice use the same chat agent with durable delivery a
   }
 });
 
-test('saved plan is attached to its assistant message for the compact chat card', async () => {
+test('market search remains available through the HTTP chat path without creating plans', async () => {
   const db=createTestDb();
-  const projectId=Number(db.prepare('INSERT INTO projects(name) VALUES(?)').run('خطة واجهة').lastInsertRowid);
+  const projectId=Number(db.prepare('INSERT INTO projects(name) VALUES(?)').run('بحث واجهة').lastInsertRowid);
   const conversationId=Number(db.prepare('INSERT INTO conversations(project_id) VALUES(?)').run(projectId).lastInsertRowid);
-  const plan={objective:'خطة تجارة صغيرة',assumptions:['تقدير أولي'],steps:['اختبار السوق','مراجعة التكاليف'],risks:['تغير الأسعار'],missingInformation:[]};
-  const model={decide:async()=>toolCall('deliver_business_plan',{plan,answer:'جهزتلك الخطة المبدئية.',status:'PROVISIONAL'})};
+  let decisions=0;
+  const model={decide:async()=>{ decisions++; if(decisions===1)return toolCall('search_market',{query:'سعر عبوة',location:'القاهرة',searchType:'search'}); return toolCall('deliver_response',{taskType:'question',answer:'لقيت نتيجة بحث مناسبة.',status:'COMPLETE'}); }};
   const config={root:path.resolve(__dirname,'..'),taskMaxDecisions:2,taskMaxTools:2,taskTimeoutMs:5000,leaseMs:5000};
-  const agent=createAgent({db,config,model,search:async()=>({results:[]})});const app=createApp({db,config,agent});const server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));
-  try{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/chat`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({projectId,conversationId,message:'اعملي خطة',requestId:'plan-card-http'})});const accepted=await response.json();const final=await waitForTask(agent,accepted.taskId,projectId);assert.equal(final.status,'PROVISIONAL');const history=await (await fetch(`http://127.0.0.1:${server.address().port}/api/projects/${projectId}/conversation`)).json();const assistant=history.messages.find(row=>row.role==='assistant');assert.equal(assistant.plan.revision,1);assert.equal(assistant.plan.qualityStatus,'PROVISIONAL');assert.equal(assistant.plan.plan.objective,plan.objective);}finally{await new Promise(resolve=>server.close(resolve));db.close();}
+  const agent=createAgent({db,config,model,search:async()=>({provider:'serper',receivedAt:new Date().toISOString(),resultCount:1,results:[{title:'عبوة',snippet:'20 EGP',price:'20 EGP',url:'https://example.test/offer'}]})});const app=createApp({db,config,agent});const server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));
+  try{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/chat`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({projectId,conversationId,message:'ابحثي عن سعر عبوة',requestId:'search-http'})});const accepted=await response.json();const final=await waitForTask(agent,accepted.taskId,projectId);assert.equal(final.status,'COMPLETE',JSON.stringify(final));assert.equal(db.prepare('SELECT COUNT(*) n FROM fahima_v2_research WHERE project_id=?').get(projectId).n,1);assert.equal(agent.plans.latest(projectId),null);}finally{await new Promise(resolve=>server.close(resolve));db.close();}
 });
 
 test('project report PDF is generated from the scoped ledger report', async () => {
