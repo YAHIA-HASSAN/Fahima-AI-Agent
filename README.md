@@ -40,4 +40,8 @@ npm run test:live:tts
 - `src/public/`: واجهة عربية وصوت المتصفح.
 - `tests/`: اختبارات الوكيل والمجالات وواجهات HTTP والهجرة والاستعادة.
 
+## فريق العمل 
+- علياء خالد
+- يحيى حسن 
+
 تفاصيل الاستعادة والقيود الحالية في [docs/cutover-and-recovery.md](docs/cutover-and-recovery.md)، وتدفق التنفيذ في [docs/architecture.md](docs/architecture.md).
